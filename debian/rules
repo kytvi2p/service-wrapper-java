@@ -1,0 +1,116 @@
+#!/usr/bin/make -f 
+
+DH_VERBOSE=1
+CLASSPATH="/usr/share/java/junit4.jar:/usr/share/java/junit.jar:/usr/share/java/commons-collections.jar"
+export CLASSPATH
+export DEB_HOST_ARCH := $(shell dpkg-architecture -qDEB_HOST_ARCH)
+export DEB_HOST_ARCH_CPU := $(shell dpkg-architecture -qDEB_HOST_ARCH_CPU)
+
+#DEB_DESTDIR=debian/acgvision-agent
+
+build: build-arch-stamp build-indep-stamp
+	dh_testdir
+	if test i386 = $(DEB_HOST_ARCH_CPU); then \
+                make -f Makefile-linux-x86-32.make -C src/c; fi
+	if test amd64 = $(DEB_HOST_ARCH_CPU); then \
+                make -f Makefile-linux-x86-64.make -C src/c; fi
+	if test ia64 = $(DEB_HOST_ARCH_CPU); then \
+                make -f Makefile-linux-ia-64.make -C src/c; fi
+	if test powerpc = $(DEB_HOST_ARCH_CPU); then \
+                make -f Makefile-linux-ppc-32.make -C src/c; fi
+	jh_build
+
+build-arch: build-arch-stamp
+build-arch-stamp:
+	dh_testdir
+	if test i386 = $(DEB_HOST_ARCH_CPU); then \
+                make -f Makefile-linux-x86-32.make -C src/c; fi
+	if test amd64 = $(DEB_HOST_ARCH_CPU); then \
+                make -f Makefile-linux-x86-64.make -C src/c; fi
+	if test ia64 = $(DEB_HOST_ARCH_CPU); then \
+                make -f Makefile-linux-ia-64.make -C src/c; fi
+	if test powerpc = $(DEB_HOST_ARCH_CPU); then \
+                make -f Makefile-linux-ppc-32.make -C src/c; fi
+	touch $@
+
+build-indep: build-indep-stamp
+build-indep-stamp:
+	dh_testdir
+	# Build the package
+	jh_build
+	touch $@
+
+clean:
+	dh_testdir
+	dh_testroot
+	jh_build --clean
+	dh_clean
+	rm -f lib/*.jar
+	rm -f lib/*.so
+	rm -f src/c/*.o
+	rm -f bin/wrapper
+
+install-indep: build-indep
+	dh_testdir
+	dh_testroot
+	dh_clean -k
+	dh_installdirs
+
+binary-arch: build-arch
+	# Create the package here
+	dh_testdir
+	dh_testroot
+	dh_clean -k
+	dh_install -a
+	#jh_installlibs wrapper.jar -plibservice-wrapper-java
+	dh_installdocs -a 
+	dh_installchangelogs -a
+	dh_installman debian/wrapper.1
+	#jh_depends
+	dh_link -a
+	dh_strip -a
+	#Depends
+	dh_shlibdeps -a
+	#Compress
+	dh_compress -a
+	dh_fixperms -a
+	dh_installdeb -a
+	dh_gencontrol -a
+	dh_md5sums -a
+	dh_builddeb -a
+
+
+binary-indep: build-indep install-indep
+	# Create the package here
+	dh_testdir 
+	dh_testroot -i
+	dh_clean -k
+	dh_install -i
+	jh_installlibs wrapper.jar -plibservice-wrapper-java
+	dh_installdocs -i
+	dh_installchangelogs -i
+	jh_depends -i
+	dh_link -i
+	dh_strip -i
+	#Depends
+	dh_shlibdeps -i
+	#Compress
+	dh_compress -i
+	dh_fixperms -i
+	dh_installdeb -i
+	dh_gencontrol -i
+	dh_md5sums -i
+	dh_builddeb -i
+
+
+post-clean:
+	dh_clean
+	jh_build --clean
+	dh_clean
+	rm -f lib/*.jar
+	rm -f lib/*.so
+	rm -f src/c/*.o
+	rm -f bin/wrapper
+
+binary: binary-indep binary-arch 
+.PHONY: build build-arch build-indep clean binary-indep binary-arch binary install-indep  post-clean

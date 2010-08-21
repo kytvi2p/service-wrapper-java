@@ -1,0 +1,50 @@
+Source: service-wrapper-java
+Section: java
+Priority: optional
+Maintainer: Rémi Debay <debay.remi@gmail.com>
+Uploaders: tony mancill <tmancill@debian.org>
+Build-Depends: debhelper (>= 7), javahelper, default-jdk,
+ default-jdk-builddep, ant, ant-optional, junit, junit4
+Standards-Version: 3.9.1
+Homepage: http://wrapper.tanukisoftware.org
+
+Package: service-wrapper
+Architecture:  amd64 i386 ia64 powerpc
+Depends:  ${shlibs:Depends}, ${misc:Depends}, libservice-wrapper-java,
+ libservice-wrapper-jni
+Description:Jar daemon wrapper
+ The Java Service Wrapper makes very easy to install a Java Application as a
+ daemon process on Unix systems. The Wrapper monitors a JVM (Java Virtual
+ Machine) process and automatically restarts it if it that the JVM has crashed
+ or hung. This process takes just a few seconds once the Wrapper has decided
+ there is a problem. It also gives the ability to handle process priority.
+
+
+Package: libservice-wrapper-java
+Architecture: all
+Depends: ${java:Depends}, ${shlibs:Depends}, ${misc:Depends}, 
+ default-jre | java5-runtime | java6-runtime 
+Description:Jar daemon wrapper java libraries
+ This Package contains the Java jar libraries used by the Java Service Wrapper.
+ It can be used to handle wrapper specific attributes.
+ .
+ The Java Service Wrapper makes very easy to install a Java Application as a
+ daemon process on Unix systems. The Wrapper monitors a JVM (Java Virtual
+ Machine) process and automatically restarts it if it that the JVM has crashed
+ or hung. This process takes just a few seconds once the Wrapper has decided
+ there is a problem. It also gives the ability to handle process priority.
+
+
+Package: libservice-wrapper-jni
+Architecture: amd64 i386 ia64 powerpc
+Depends: ${shlibs:Depends}, ${misc:Depends}, 
+ default-jre | java5-runtime | java6-runtime
+Description:Jar daemon wrapper JNI libraries
+ This Package contains the JNI libraries used by the Java Service Wrapper.
+ .
+ The Java Service Wrapper makes very easy to install a Java Application as a
+ daemon process on Unix systems. The Wrapper monitors a JVM (Java Virtual
+ Machine) process and automatically restarts it if it that the JVM has crashed
+ or hung. This process takes just a few seconds once the Wrapper has decided
+ there is a problem. It also gives the ability to handle process priority.
+

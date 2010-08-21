@@ -1,0 +1,24 @@
+This work was packaged for Debian by:
+
+    Rémi Debay <debay.remi@gmail.com> on Wed, 04 Aug 2010 17:31:56 +0200
+
+It was downloaded from http://sourceforge.net/projects/wrapper/files/wrapper_src/Wrapper_3.5.3_20100803/wrapper_3.5.3_src.tar.gz/download
+
+Upstream Author(s):
+
+    Tanuki Software, Ltd.
+
+Copyright:
+
+    Copyright (C) 2010 Tanuki Software, Ltd. 
+
+License:
+
+    GNU GPLv2
+
+The Debian packaging is:
+
+    Copyright (C) 2010 Rémi Debay <debay.remi@gmail.com>
+
+and is licensed under the GPL version 3, 
+see `/usr/share/common-licenses/GPL-3'.

@@ -1,0 +1,58 @@
+Description: Upstream changes introduced in version 3.5.3-2
+ This patch has been created by dpkg-source during the package build.
+ Here's the last changelog entry, hopefully it gives details on why
+ those changes were made:
+ .
+ service-wrapper-java (3.5.3-2) experimental; urgency=low
+ .
+   [ Rémi Debay ]
+   * Moving jni library to /usr/lib/jni.
+   * Changing standards version  to 3.9.1.
+   * split the package on 3 packages.
+   * Adding manpage for wrapper.
+   * Imporving building for archs specifics packages.
+ .
+   [ tony mancill ]
+   * Add myself to Uploaders in debian/control.
+   * Set distribution to experimental for upload during freeze.
+ .
+ The person named in the Author field signed this changelog entry.
+Author: tony mancill <tmancill@debian.org>
+
+---
+The information above should follow the Patch Tagging Guidelines, please
+checkout http://dep.debian.net/deps/dep3/ to learn about the format. Here
+are templates for supplementary fields that you might want to add:
+
+Origin: <vendor|upstream|other>, <url of original patch>
+Bug: <url in upstream bugtracker>
+Bug-Debian: http://bugs.debian.org/<bugnumber>
+Bug-Ubuntu: https://launchpad.net/bugs/<bugnumber>
+Forwarded: <no|not-needed|url proving that it has been forwarded>
+Reviewed-By: <name and email of someone who approved the patch>
+Last-Update: <YYYY-MM-DD>
+
+--- service-wrapper-java-3.5.3.orig/src/java/org/tanukisoftware/wrapper/WrapperInfo.java
++++ service-wrapper-java-3.5.3/src/java/org/tanukisoftware/wrapper/WrapperInfo.java
+@@ -56,8 +56,8 @@ final class WrapperInfo
+         Calendar buildTime = Calendar.getInstance();
+         try
+         {
+-            buildDate.setTime( new SimpleDateFormat( "yyyyMMdd" ).parse( "20100805" ) );
+-            buildTime.setTime( new SimpleDateFormat( "HHmm" ).parse( "1605" ) );
++            buildDate.setTime( new SimpleDateFormat( "yyyyMMdd" ).parse( "20100809" ) );
++            buildTime.setTime( new SimpleDateFormat( "HHmm" ).parse( "1744" ) );
+             
+             m_build.set( buildDate.get( Calendar.YEAR ), 
+                         buildDate.get( Calendar.MONTH ), 
+--- service-wrapper-java-3.5.3.orig/src/c/wrapperinfo.c
++++ service-wrapper-java-3.5.3/src/c/wrapperinfo.c
+@@ -30,6 +30,6 @@ TCHAR *wrapperArch = TEXT("x86");
+ TCHAR *wrapperOS = TEXT("linux");
+ TCHAR *wrapperReleaseDate = TEXT("20100803");
+ TCHAR *wrapperReleaseTime = TEXT("0000");
+-TCHAR *wrapperBuildDate = TEXT("20100805");
+-TCHAR *wrapperBuildTime = TEXT("1605");
++TCHAR *wrapperBuildDate = TEXT("20100809");
++TCHAR *wrapperBuildTime = TEXT("1744");
+ 
