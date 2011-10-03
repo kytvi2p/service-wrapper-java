@@ -5,8 +5,11 @@ service-wrapper-java (3.5.3-3) unstable; urgency=low
   * Add build-wrapper-scripts and example wrapper.conf (Closes: #621914)
     - Thanks to Ximim Luo
   * Add Vcs-Git: and Vcs-Browser: fields to debian/control.
+  * Remove deprecated build-dep on default-jdk-builddep
+  * Remove deprecated JRE/JDK dependency from libservice-wrapper-java
+  * Update debian/copyright to DEP5.  Fully quote the upstream license.
 
- -- tony mancill <tmancill@debian.org>  Sun, 02 Oct 2011 20:20:48 -0700
+ -- tony mancill <tmancill@debian.org>  Sun, 02 Oct 2011 21:34:57 -0700
 
 service-wrapper-java (3.5.3-2) experimental; urgency=low
 
