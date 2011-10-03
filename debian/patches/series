@@ -1,2 +1,2 @@
-debian-changes-3.5.3-1
-debian-changes-3.5.3-2
+01_disable_buildtime_in_buildfile.patch
+02_update_buildtime.patch
