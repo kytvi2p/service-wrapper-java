@@ -1,3 +1,0 @@
-java:Depends=junit,  junit4,  libcommons-collections-java
-shlibs:Depends=libc6 (>= 2.3.6-6~), libc6 (>= 2.4)
-misc:Depends=
