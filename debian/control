@@ -5,7 +5,9 @@ Maintainer: Rémi Debay <debay.remi@gmail.com>
 Uploaders: tony mancill <tmancill@debian.org>
 Build-Depends: debhelper (>= 7), javahelper, default-jdk,
  default-jdk-builddep, ant, ant-optional, junit, junit4
-Standards-Version: 3.9.1
+Standards-Version: 3.9.2
+Vcs-Git: git://git.debian.org/git/collab-maint/service-wrapper-java.git
+Vcs-Browser: http://git.debian.org/?p=collab-maint/service-wrapper-java.git
 Homepage: http://wrapper.tanukisoftware.org
 
 Package: service-wrapper

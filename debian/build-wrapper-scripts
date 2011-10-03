@@ -1,0 +1,140 @@
+#!/bin/sh
+# Split up service-wrapper-java sh.script.in into a user-editable config
+# component that calls the static code, which needs not be modified.
+
+SRCSH="src/bin/sh.script.in"
+
+if [ ! -f "$SRCSH" ]; then echo >&2 "cwd has no $SRCSH"; exit 1; fi
+if [ ! -d "$BUILD_DIR" ]; then echo >&2 "BUILD_DIR not a directory, or unset: $BUILD_DIR"; exit 1; fi
+
+WRAPPER_SERVICE="$1"
+WRAPPER_CMD="$2"
+
+mk_init_template() {
+	{
+	sed -n -e "1,${2}p" "$SRCSH"
+	cat <<EOF
+
+if [ -f "/etc/default/\$APP_NAME" ]; then
+	. "/etc/default/\$APP_NAME"
+fi
+
+# WRAPPER_PREINIT START
+# WRAPPER_PREINIT END
+
+. "$WRAPPER_SERVICE"
+
+EOF
+	} | sed -e 's|^\(WRAPPER_CMD=\).*|\1"'"$WRAPPER_CMD"'"|g'
+}
+
+mk_daemon_sh() {
+	sed -n -e "1,${1}p" "$SRCSH"
+	cat <<'EOF'
+
+if [ -z "$WRAPPER_CONF" ]; then
+	echo >&2 "WRAPPER_CONF not set; abort"
+	exit 1
+fi
+
+EOF
+	sed -n -e "${2},\$p" "$SRCSH"
+}
+
+mk_make_wrapper_init_sh() {
+	cat <<'EOF2'
+#!/bin/sh
+# Create an application-specific initscript that runs service-wrapper.
+
+QUIET=false
+PREINIT_SH=/dev/null
+
+case "$1" in
+-q|--quiet)
+	QUIET=true
+	;;
+-h|--help)
+	echo >&2 "Usage: cat <PARAMS> | $0 [-q|--quiet]"
+	exit 1
+esac
+
+if ! $QUIET; then
+	cat >&2 <<EOF
+This script will generate an initscript that runs service-wrapper. I will now
+read from STDIN; please input your parameters in the following format:
+
+==== start of input stream ====
+APP_NAME
+APP_LONG_NAME
+APP_DESCRIPTION
+NAME1 VALUE1
+NAME2 VALUE2
+...
+NAMEn VALUEn
+
+PREINIT_SHELL_SCRIPT_LINE1
+PREINIT_SHELL_SCRIPT_LINE2
+...
+PREINIT_SHELL_SCRIPT_LINEn
+==== end of input stream ====
+
+where:
+
+APP_NAME: short system name of application, e.g. avahi-daemon, apache2
+	This is used to refer to scripts like /etc/default/APP_NAME
+APP_LONG_NAME: long name of application, e.g. Apache Web Server
+	This is used to refer to the application in messages for the end user.
+APP_DESCRIPTION: longer description for your application
+	This serves as documentation for the end user.
+NAMEn VALUEn: optional name-value pairs that set application-specific defaults
+	for service-wrapper variables. At run-time, these may be overridden by user
+	settings in /etc/default/APP_NAME. Note: a space separates NAME VALUE, not
+	an equals sign (=). Also, currently VALUE cannot contain "|".
+PREINIT_SHELL_SCRIPTn: at run-time, these commands will be run after the script
+sources /etc/default/APP_NAME, to do further processing on any variables set.
+
+Please enter your input; press Ctrl-D when you are done:
+EOF
+fi
+
+# splice params
+
+SED_ARGS=""
+push_sed_expr() { SED_ARGS="$SED_ARGS -e '$1'"; }
+
+read APP_NAME
+push_sed_expr "s/@app.name@/$APP_NAME/g"
+
+read APP_LONG_NAME
+push_sed_expr "s/@app.long.name@/$APP_LONG_NAME/g"
+
+read APP_DESCRIPTION
+push_sed_expr "s/@app.description@/$APP_DESCRIPTION/g"
+
+while read ARG VAL; do
+	if [ -z "$ARG" ]; then break; fi
+	push_sed_expr 's|^\s*#\?\s*\('"$ARG"'=\).*|\1"'"$VAL"'"|g'
+done
+
+PREINIT_SH="$(tempfile)"
+cat - > "$PREINIT_SH"
+
+if ! $QUIET; then set -x; fi
+eval sed $SED_ARGS <<EOF | sed -e "/WRAPPER_PREINIT START/r$PREINIT_SH"
+EOF2
+	mk_init_template "$1" "$2"
+	echo EOF
+}
+
+
+sed -n -e '/^#--/=' "$SRCSH" | {
+
+read L1
+read L2
+
+mk_daemon_sh $L1 $L2 > "$BUILD_DIR/$(basename $WRAPPER_SERVICE)"
+chmod +x "$BUILD_DIR/$(basename $WRAPPER_SERVICE)"
+mk_make_wrapper_init_sh $L1 $L2 > "$BUILD_DIR/make-wrapper-init.sh"
+chmod +x "$BUILD_DIR/make-wrapper-init.sh"
+
+}

@@ -1,8 +1,18 @@
+service-wrapper-java (3.5.3-3) unstable; urgency=low
+
+  * Set distribution to unstable.
+  * Bump standard versions to 3.9.2 (no changes needed)
+  * Add build-wrapper-scripts and example wrapper.conf (Closes: #621914)
+    - Thanks to Ximim Luo
+  * Add Vcs-Git: and Vcs-Browser: fields to debian/control.
+
+ -- tony mancill <tmancill@debian.org>  Sun, 02 Oct 2011 20:20:48 -0700
+
 service-wrapper-java (3.5.3-2) experimental; urgency=low
 
   [ Rémi Debay ]
   * Moving jni library to /usr/lib/jni.
-  * Changing standards version  to 3.9.1.
+  * Changing standards version to 3.9.1.
   * split the package on 3 packages.
   * Adding manpage for wrapper.
   * Imporving building for archs specifics packages.

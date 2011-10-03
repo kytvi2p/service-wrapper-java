@@ -1,10 +1,12 @@
-#!/usr/bin/make -f 
+#!/usr/bin/make -f
 
 DH_VERBOSE=1
-CLASSPATH="/usr/share/java/junit4.jar:/usr/share/java/junit.jar:/usr/share/java/commons-collections.jar"
+DEB_HOST_ARCH     := $(shell dpkg-architecture -qDEB_HOST_ARCH)
+DEB_HOST_ARCH_CPU := $(shell dpkg-architecture -qDEB_HOST_ARCH_CPU)
+CLASSPATH         := /usr/share/java/junit4.jar:/usr/share/java/junit.jar:/usr/share/java/commons-collections.jar
+JAVA_HOME         := /usr/lib/jvm/default-java
 export CLASSPATH
-export DEB_HOST_ARCH := $(shell dpkg-architecture -qDEB_HOST_ARCH)
-export DEB_HOST_ARCH_CPU := $(shell dpkg-architecture -qDEB_HOST_ARCH_CPU)
+export JAVA_HOME
 
 #DEB_DESTDIR=debian/acgvision-agent
 
@@ -38,6 +40,7 @@ build-indep-stamp:
 	dh_testdir
 	# Build the package
 	jh_build
+	BUILD_DIR=lib /bin/sh $(CURDIR)/debian/build-wrapper-scripts /usr/share/wrapper/daemon.sh /usr/sbin/wrapper
 	touch $@
 
 clean:
@@ -47,6 +50,7 @@ clean:
 	dh_clean
 	rm -f lib/*.jar
 	rm -f lib/*.so
+	rm -f lib/*.sh
 	rm -f src/c/*.o
 	rm -f bin/wrapper
 
@@ -63,7 +67,7 @@ binary-arch: build-arch
 	dh_clean -k
 	dh_install -a
 	#jh_installlibs wrapper.jar -plibservice-wrapper-java
-	dh_installdocs -a 
+	dh_installdocs -a
 	dh_installchangelogs -a
 	dh_installman debian/wrapper.1
 	#jh_depends
@@ -82,7 +86,7 @@ binary-arch: build-arch
 
 binary-indep: build-indep install-indep
 	# Create the package here
-	dh_testdir 
+	dh_testdir
 	dh_testroot -i
 	dh_clean -k
 	dh_install -i
@@ -112,5 +116,5 @@ post-clean:
 	rm -f src/c/*.o
 	rm -f bin/wrapper
 
-binary: binary-indep binary-arch 
+binary: binary-indep binary-arch
 .PHONY: build build-arch build-indep clean binary-indep binary-arch binary install-indep  post-clean
