@@ -47,24 +47,24 @@ clean:
 	dh_testdir
 	dh_testroot
 	jh_build --clean
-	dh_clean
 	rm -f lib/*.jar
 	rm -f lib/*.so
 	rm -f lib/*.sh
 	rm -f src/c/*.o
 	rm -f bin/wrapper
+	dh_clean
 
 install-indep: build-indep
 	dh_testdir
 	dh_testroot
-	dh_clean -k
+	dh_prep -k
 	dh_installdirs
 
 binary-arch: build-arch
 	# Create the package here
 	dh_testdir
 	dh_testroot
-	dh_clean -k
+	dh_prep -k
 	dh_install -a
 	#jh_installlibs wrapper.jar -plibservice-wrapper-java
 	dh_installdocs -a
@@ -88,7 +88,7 @@ binary-indep: build-indep install-indep
 	# Create the package here
 	dh_testdir
 	dh_testroot -i
-	dh_clean -k
+	dh_prep -k
 	dh_install -i
 	jh_installlibs wrapper.jar -plibservice-wrapper-java
 	dh_installdocs -i
@@ -108,13 +108,12 @@ binary-indep: build-indep install-indep
 
 
 post-clean:
-	dh_clean
 	jh_build --clean
-	dh_clean
 	rm -f lib/*.jar
 	rm -f lib/*.so
 	rm -f src/c/*.o
 	rm -f bin/wrapper
+	dh_clean
 
 binary: binary-indep binary-arch
 .PHONY: build build-arch build-indep clean binary-indep binary-arch binary install-indep  post-clean
