@@ -33,6 +33,7 @@ build-arch-stamp:
                 make -f Makefile-linux-ia-64.make -C src/c; fi
 	if test powerpc = $(DEB_HOST_ARCH_CPU); then \
                 make -f Makefile-linux-ppc-32.make -C src/c; fi
+	BUILD_DIR=lib /bin/sh $(CURDIR)/debian/build-wrapper-scripts /usr/share/wrapper/daemon.sh /usr/sbin/wrapper
 	touch $@
 
 build-indep: build-indep-stamp
@@ -40,7 +41,6 @@ build-indep-stamp:
 	dh_testdir
 	# Build the package
 	jh_build
-	BUILD_DIR=lib /bin/sh $(CURDIR)/debian/build-wrapper-scripts /usr/share/wrapper/daemon.sh /usr/sbin/wrapper
 	touch $@
 
 clean:

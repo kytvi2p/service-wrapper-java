@@ -1,3 +1,10 @@
+service-wrapper-java (3.5.3-4) unstable; urgency=low
+
+  * Fix binary-arch build (Closes: #666309)
+  * Update Format in d/copyright.
+
+ -- tony mancill <tmancill@debian.org>  Sun, 01 Apr 2012 16:52:27 -0700
+
 service-wrapper-java (3.5.3-3) unstable; urgency=low
 
   * Set distribution to unstable.
