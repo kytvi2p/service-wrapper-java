@@ -1,0 +1,68 @@
+Descrition: Patch to resolve FTBFS with ld --as-needed (Debian #647355)
+Author: Ilya Barygin <randomaction@ubuntu.com>
+Forwarded: no
+
+diff --git a/src/c/Makefile-linux-ia-64.make b/src/c/Makefile-linux-ia-64.make
+index f05af30..b7fb6a8 100644
+--- a/src/c/Makefile-linux-ia-64.make
++++ b/src/c/Makefile-linux-ia-64.make
+@@ -33,10 +33,10 @@ init:
+ 	if test ! -d .deps; then mkdir .deps; fi
+ 
+ wrapper: $(wrapper_SOURCE)
+-	$(COMPILE) -lm -pthread $(wrapper_SOURCE) -o $(BIN)/wrapper
++	$(COMPILE) -pthread $(wrapper_SOURCE) -lm -o $(BIN)/wrapper
+ 
+ libwrapper.so: $(libwrapper_so_OBJECTS)
+-	${COMPILE} -lm -shared $(libwrapper_so_OBJECTS) -o $(LIB)/libwrapper.so
++	${COMPILE} -shared $(libwrapper_so_OBJECTS) -lm -o $(LIB)/libwrapper.so
+ 
+ %.o: %.c
+ 	@echo '$(COMPILE) -c $<'; \
+diff --git a/src/c/Makefile-linux-ppc-32.make b/src/c/Makefile-linux-ppc-32.make
+index 9a2cd30..027a9bb 100644
+--- a/src/c/Makefile-linux-ppc-32.make
++++ b/src/c/Makefile-linux-ppc-32.make
+@@ -33,7 +33,7 @@ init:
+ 	if test ! -d .deps; then mkdir .deps; fi
+ 
+ wrapper: $(wrapper_SOURCE)
+-	$(COMPILE) -pthread -lm $(wrapper_SOURCE) -o $(BIN)/wrapper
++	$(COMPILE) -pthread $(wrapper_SOURCE) -lm -o $(BIN)/wrapper
+ 
+ libwrapper.so: $(libwrapper_so_OBJECTS)
+ 	${COMPILE} -shared $(libwrapper_so_OBJECTS) -o $(LIB)/libwrapper.so
+diff --git a/src/c/Makefile-linux-x86-32.make b/src/c/Makefile-linux-x86-32.make
+index 2d999a6..c7984dd 100644
+--- a/src/c/Makefile-linux-x86-32.make
++++ b/src/c/Makefile-linux-x86-32.make
+@@ -33,10 +33,10 @@ init:
+ 	if test ! -d .deps; then mkdir .deps; fi
+ 
+ wrapper: $(wrapper_SOURCE)
+-	$(COMPILE) -lm -pthread $(wrapper_SOURCE) -o $(BIN)/wrapper
++	$(COMPILE) -pthread $(wrapper_SOURCE) -lm -o $(BIN)/wrapper
+ 
+ libwrapper.so: $(libwrapper_so_OBJECTS)
+-	${COMPILE} -lm -shared -fPIC $(libwrapper_so_OBJECTS) -o $(LIB)/libwrapper.so
++	${COMPILE} -shared -fPIC $(libwrapper_so_OBJECTS) -lm -o $(LIB)/libwrapper.so
+ 
+ %.o: %.c
+ 	@echo '$(COMPILE) -c $<'; \
+diff --git a/src/c/Makefile-linux-x86-64.make b/src/c/Makefile-linux-x86-64.make
+index f05af30..b7fb6a8 100644
+--- a/src/c/Makefile-linux-x86-64.make
++++ b/src/c/Makefile-linux-x86-64.make
+@@ -33,10 +33,10 @@ init:
+ 	if test ! -d .deps; then mkdir .deps; fi
+ 
+ wrapper: $(wrapper_SOURCE)
+-	$(COMPILE) -lm -pthread $(wrapper_SOURCE) -o $(BIN)/wrapper
++	$(COMPILE) -pthread $(wrapper_SOURCE) -lm -o $(BIN)/wrapper
+ 
+ libwrapper.so: $(libwrapper_so_OBJECTS)
+-	${COMPILE} -lm -shared $(libwrapper_so_OBJECTS) -o $(LIB)/libwrapper.so
++	${COMPILE} -shared $(libwrapper_so_OBJECTS) -lm -o $(LIB)/libwrapper.so
+ 
+ %.o: %.c
+ 	@echo '$(COMPILE) -c $<'; \

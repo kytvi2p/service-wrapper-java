@@ -1,2 +1,3 @@
 01_disable_buildtime_in_buildfile.patch
 02_update_buildtime.patch
+03_ld_as_needed.patch

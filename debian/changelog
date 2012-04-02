@@ -2,8 +2,10 @@ service-wrapper-java (3.5.3-4) unstable; urgency=low
 
   * Fix binary-arch build (Closes: #666309)
   * Update Format in d/copyright.
+  * Add patch for --as-needed linker option (Closes: #647355)
+    - Thanks to Ilya Barygin <randomaction@ubuntu.com>
 
- -- tony mancill <tmancill@debian.org>  Sun, 01 Apr 2012 16:52:27 -0700
+ -- tony mancill <tmancill@debian.org>  Sun, 01 Apr 2012 16:57:39 -0700
 
 service-wrapper-java (3.5.3-3) unstable; urgency=low
 
