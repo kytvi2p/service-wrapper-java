@@ -1,3 +1,10 @@
+service-wrapper-java (3.5.3+repack-0+nmu1) unstable; urgency=medium
+
+  * Non-maintainer upload.
+  * Repack upstream source to remove .pc directory (closes: #702790).
+
+ -- Michael Gilbert <mgilbert@debian.org>  Thu, 21 Mar 2013 05:12:48 +0000
+
 service-wrapper-java (3.5.3-4) unstable; urgency=low
 
   * Fix binary-arch build (Closes: #666309)
