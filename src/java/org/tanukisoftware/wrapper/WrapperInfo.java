@@ -1,7 +1,7 @@
 package org.tanukisoftware.wrapper;
 
 /*
- * Copyright (c) 1999, 2010 Tanuki Software, Ltd.
+ * Copyright (c) 1999, 2013 Tanuki Software, Ltd.
  * http://www.tanukisoftware.com
  * All rights reserved.
  *
@@ -43,7 +43,7 @@ import java.text.ParseException;
 final class WrapperInfo
 {
     /** Version of the Wrapper. */
-    private static final String   m_version         = "3.5.3";
+    private static final String   m_version         = "3.5.22";
 
     /** Date that the Wrapper was built. */
     private static final Calendar m_build           = Calendar.getInstance();
@@ -56,8 +56,8 @@ final class WrapperInfo
         Calendar buildTime = Calendar.getInstance();
         try
         {
-            buildDate.setTime( new SimpleDateFormat( "yyyyMMdd" ).parse( "20100805" ) );
-            buildTime.setTime( new SimpleDateFormat( "HHmm" ).parse( "0928" ) );
+            buildDate.setTime( new SimpleDateFormat( "yyyyMMdd" ).parse( "20131008" ) );
+            buildTime.setTime( new SimpleDateFormat( "HHmm" ).parse( "1519" ) );
             
             m_build.set( buildDate.get( Calendar.YEAR ), 
                         buildDate.get( Calendar.MONTH ), 

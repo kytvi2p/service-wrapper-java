@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999, 2010 Tanuki Software, Ltd.
+ * Copyright (c) 1999, 2013 Tanuki Software, Ltd.
  * http://www.tanukisoftware.com
  * All rights reserved.
  *
@@ -39,7 +39,11 @@
 #include <stdlib.h>
 #include <time.h>
 #include <sys/stat.h>
+#include <assert.h>
 
+#ifdef CUNIT
+#include "CUnit/Basic.h"
+#endif
 #include "wrapper_i18n.h"
 #include "wrapperinfo.h"
 #include "wrapper.h"
@@ -51,6 +55,8 @@
  #include <winsock.h>
  #include <shlwapi.h>
  #include <windows.h>
+ #include <io.h>
+
 
 /* MS Visual Studio 8 went and deprecated the POXIX names for functions.
  *  Fixing them all would be a big headache for UNIX versions. */
@@ -81,6 +87,8 @@
  #include <netinet/in.h>
  #include <arpa/inet.h>
  #define SOCKET         int
+ #define HANDLE         int
+ #define INVALID_HANDLE_VALUE -1
  #define INVALID_SOCKET -1
  #define SOCKET_ERROR   -1
 
@@ -122,11 +130,26 @@ HANDLE tickMutexHandle = NULL;
 pthread_mutex_t tickMutex = PTHREAD_MUTEX_INITIALIZER;
 #endif
 
+/* Server Pipe Handles. */
+HANDLE protocolActiveServerPipeIn = INVALID_HANDLE_VALUE;
+HANDLE protocolActiveServerPipeOut = INVALID_HANDLE_VALUE;
+/* Flag for indicating the connected pipes */
+int protocolActiveServerPipeConnected = FALSE;
+
 /* Server Socket. */
 SOCKET protocolActiveServerSD = INVALID_SOCKET;
 /* Client Socket. */
 SOCKET protocolActiveBackendSD = INVALID_SOCKET;
+
+int disposed = FALSE;
 int loadConfiguration();
+
+#define READ_BUFFER_BLOCK_SIZE 1024
+char *wrapperChildWorkBuffer = NULL;
+size_t wrapperChildWorkBufferSize = 0;
+size_t wrapperChildWorkBufferLen = 0;
+time_t wrapperChildWorkLastDataTime = 0;
+int wrapperChildWorkLastDataTimeMillis = 0;
 
 /**
  * Constructs a tm structure from a pair of Strings like "20091116" and "1514".
@@ -185,10 +208,18 @@ struct tm wrapperGetBuildTime() {
  */
 void wrapperAddDefaultProperties() {
     size_t bufferLen;
-    TCHAR* buffer;
+    TCHAR* buffer, *langTemp, *confDirTemp;
+#ifdef WIN32
+    int work, pos2;
+    TCHAR pathSep = TEXT('\\');
+#else
+    TCHAR pathSep = TEXT('/');
+#endif
+    int pos;
 
     /* IMPORTANT - If any new values are added here, this work buffer length may need to be calculated differently. */
     bufferLen = 1;
+    bufferLen = __max(bufferLen, _tcslen(TEXT("set.WRAPPER_LANG=")) + 3 + 1);
     bufferLen = __max(bufferLen, _tcslen(TEXT("set.WRAPPER_PID=")) + 10 + 1); /* 32-bit PID would be max of 10 characters */
     bufferLen = __max(bufferLen, _tcslen(TEXT("set.WRAPPER_BITS=")) + _tcslen(wrapperBits) + 1);
     bufferLen = __max(bufferLen, _tcslen(TEXT("set.WRAPPER_ARCH=")) + _tcslen(wrapperArch) + 1);
@@ -196,35 +227,131 @@ void wrapperAddDefaultProperties() {
     bufferLen = __max(bufferLen, _tcslen(TEXT("set.WRAPPER_HOSTNAME=")) + _tcslen(wrapperData->hostName) + 1);
     bufferLen = __max(bufferLen, _tcslen(TEXT("set.WRAPPER_HOST_NAME=")) + _tcslen(wrapperData->hostName) + 1);
 
+    if (wrapperData->confDir == NULL) {
+        if (_tcsrchr(wrapperData->argConfFile, pathSep) != NULL) {
+            pos = (int)(_tcsrchr(wrapperData->argConfFile, pathSep) - wrapperData->argConfFile);
+        } else {
+            pos = -1;
+        }
+#ifdef WIN32
+        if (_tcsrchr(wrapperData->argConfFile, TEXT('/')) != NULL) {
+            pos2 = (int)(_tcsrchr(wrapperData->argConfFile, TEXT('/')) - wrapperData->argConfFile);
+        } else {
+            pos2 = -1;
+        }
+        pos = __max(pos, pos2);
+#endif
+        if (pos == -1) {
+            confDirTemp = malloc(sizeof(TCHAR) * 2);
+            if (!confDirTemp) {
+                outOfMemory(TEXT("WADP"), 1);
+                return;
+            }
+            _tcsncpy(confDirTemp, TEXT("."), 2);
+        } else if (pos == 0) {
+            confDirTemp = malloc(sizeof(TCHAR) * 2);
+            if (!confDirTemp) {
+                outOfMemory(TEXT("WADP"), 2);
+                return;
+            }
+            _sntprintf(confDirTemp, 2, TEXT("%c"), pathSep);
+        } else {
+            confDirTemp = malloc(sizeof(TCHAR) * (pos + 1));
+            if (!confDirTemp) {
+                outOfMemory(TEXT("WADP"), 3);
+                return;
+            }
+            _tcsncpy(confDirTemp, wrapperData->argConfFile, pos);
+            confDirTemp[pos] = TEXT('\0');
+        }
+#ifdef WIN32
+        /* Get buffer size, including '\0' */
+        work = GetFullPathName(confDirTemp, 0, NULL, NULL);
+        if (!work) {
+            log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_FATAL,
+                TEXT("Unable to resolve the conf directory: %s"), getLastErrorText());
+            free(confDirTemp);
+            return;
+        }
+        wrapperData->confDir = malloc(sizeof(TCHAR) * work);
+        if (!wrapperData->confDir) {
+            outOfMemory(TEXT("WADP"), 4);
+            free(confDirTemp);
+            return;
+        }
+        if (!GetFullPathName(confDirTemp, work, wrapperData->confDir, NULL)) {
+            log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_FATAL,
+                TEXT("Unable to resolve the conf directory: %s"), getLastErrorText());
+            free(confDirTemp);
+            return;
+        }
+#else
+        /* The solaris implementation of realpath will return a relative path if a relative
+         *  path is provided.  We always need an abosulte path here.  So build up one and
+         *  then use realpath to remove any .. or other relative references. */
+        wrapperData->confDir = malloc(sizeof(TCHAR) * (PATH_MAX + 1));
+        if (!wrapperData->confDir) {
+            outOfMemory(TEXT("WADP"), 5);
+            free(confDirTemp);
+            return;
+        }
+        if (_trealpath(confDirTemp, wrapperData->confDir) == NULL) {
+            log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_FATAL,
+                TEXT("Unable to resolve the original working directory: %s"), getLastErrorText());
+            free(confDirTemp);
+            return;
+        }
+#endif
+        setEnv(TEXT("WRAPPER_CONF_DIR"), wrapperData->confDir, ENV_SOURCE_WRAPPER);
+        free(confDirTemp);
+    }
+
     buffer = malloc(sizeof(TCHAR) * bufferLen);
     if (!buffer) {
         outOfMemory(TEXT("WADP"), 1);
         return;
     }
+    langTemp = _tgetenv(TEXT("LANG"));
+    if ((langTemp == NULL) || (_tcslen(langTemp) == 0)) {
+        _sntprintf(buffer, bufferLen, TEXT("set.WRAPPER_LANG=en"));
+    } else {
+#ifdef WIN32
+        _sntprintf(buffer, bufferLen, TEXT("set.WRAPPER_LANG=%.2s"), langTemp);
+#else
+        _sntprintf(buffer, bufferLen, TEXT("set.WRAPPER_LANG=%.2S"), langTemp);
+#endif
+    }
+#if !defined(WIN32) && defined(UNICODE)
+    if (langTemp) {
+        free(langTemp);
+    }
+#endif
+    addPropertyPair(properties, NULL, 0, buffer, TRUE, FALSE, TRUE);
+
     _sntprintf(buffer, bufferLen, TEXT("set.WRAPPER_PID=%d"), wrapperData->wrapperPID);
-    addPropertyPair(properties, buffer, TRUE, FALSE, TRUE);
+    addPropertyPair(properties, NULL, 0, buffer, TRUE, FALSE, TRUE);
 
     _sntprintf(buffer, bufferLen, TEXT("set.WRAPPER_BITS=%s"), wrapperBits);
-    addPropertyPair(properties, buffer, TRUE, FALSE, TRUE);
+    addPropertyPair(properties, NULL, 0, buffer, TRUE, FALSE, TRUE);
 
     _sntprintf(buffer, bufferLen, TEXT("set.WRAPPER_ARCH=%s"), wrapperArch);
-    addPropertyPair(properties, buffer, TRUE, FALSE, TRUE);
+    addPropertyPair(properties, NULL, 0, buffer, TRUE, FALSE, TRUE);
 
     _sntprintf(buffer, bufferLen, TEXT("set.WRAPPER_OS=%s"), wrapperOS);
-    addPropertyPair(properties, buffer, TRUE, FALSE, TRUE);
+    addPropertyPair(properties, NULL, 0, buffer, TRUE, FALSE, TRUE);
 
     _sntprintf(buffer, bufferLen, TEXT("set.WRAPPER_HOSTNAME=%s"), wrapperData->hostName);
-    addPropertyPair(properties, buffer, TRUE, FALSE, TRUE);
+    addPropertyPair(properties, NULL, 0, buffer, TRUE, FALSE, TRUE);
 
     _sntprintf(buffer, bufferLen, TEXT("set.WRAPPER_HOST_NAME=%s"), wrapperData->hostName);
-    addPropertyPair(properties, buffer, TRUE, FALSE, TRUE);
+    addPropertyPair(properties, NULL, 0, buffer, TRUE, FALSE, TRUE);
 
 #ifdef WIN32
-    addPropertyPair(properties, TEXT("set.WRAPPER_FILE_SEPARATOR=\\"), TRUE, FALSE, TRUE);
-    addPropertyPair(properties, TEXT("set.WRAPPER_PATH_SEPARATOR=;"), TRUE, FALSE, TRUE);
+    addPropertyPair(properties, NULL, 0, TEXT("set.WRAPPER_FILE_SEPARATOR=\\"), TRUE, FALSE, TRUE);
+    addPropertyPair(properties, NULL, 0, TEXT("set.WRAPPER_PATH_SEPARATOR=;"), TRUE, FALSE, TRUE);
 #else
-    addPropertyPair(properties, TEXT("set.WRAPPER_FILE_SEPARATOR=/"), TRUE, FALSE, TRUE);
-    addPropertyPair(properties, TEXT("set.WRAPPER_PATH_SEPARATOR=:"), TRUE, FALSE, TRUE);
+    addPropertyPair(properties, NULL, 0, TEXT("set.WRAPPER_FILE_SEPARATOR=/"), TRUE, FALSE, TRUE);
+    addPropertyPair(properties, NULL, 0, TEXT("set.WRAPPER_PATH_SEPARATOR=:"), TRUE, FALSE, TRUE);
 #endif
 
     free(buffer);
@@ -236,12 +363,9 @@ void wrapperAddDefaultProperties() {
  */
 int showHostIds(int logLevel) {
     log_printf(WRAPPER_SOURCE_WRAPPER, logLevel, TEXT(""));
-    log_printf(WRAPPER_SOURCE_WRAPPER, logLevel, TEXT("The Community Edition of the Java Service: Wrapper does not implement"));
-    log_printf(WRAPPER_SOURCE_WRAPPER, logLevel, TEXT("HostIds."));
+    log_printf(WRAPPER_SOURCE_WRAPPER, logLevel, TEXT("The Community Edition of the Java Service Wrapper does not implement\nHostIds."));
     log_printf(WRAPPER_SOURCE_WRAPPER, logLevel, TEXT(""));
-    log_printf(WRAPPER_SOURCE_WRAPPER, logLevel, TEXT("If you have requested a trial license, or purchased a license, you"));
-    log_printf(WRAPPER_SOURCE_WRAPPER, logLevel, TEXT("may be looking for the Standard or Professional Editions of the Java"));
-    log_printf(WRAPPER_SOURCE_WRAPPER, logLevel, TEXT("Service Wrapper.  They can be downloaded here:"));
+    log_printf(WRAPPER_SOURCE_WRAPPER, logLevel, TEXT("If you have requested a trial license, or purchased a license, you\nmay be looking for the Standard or Professional Editions of the Java\nService Wrapper.  They can be downloaded here:"));
     log_printf(WRAPPER_SOURCE_WRAPPER, logLevel, TEXT("  http://wrapper.tanukisoftware.com/download"));
     log_printf(WRAPPER_SOURCE_WRAPPER, logLevel, TEXT(""));
 
@@ -270,6 +394,9 @@ int loadEnvironment() {
     int i;
 #endif
 
+#ifdef _DEBUG
+    log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS, TEXT("Loading Environment..."));
+#endif
 #ifdef WIN32
     lpvEnv = GetEnvironmentStrings();
     if (!lpvEnv)
@@ -284,7 +411,7 @@ int loadEnvironment() {
     i = 0;
     while (environment[i]) {
         len = mbstowcs(NULL, environment[i], 0);
-        if (len < 0) {
+        if (len == (size_t)-1) {
             /* Invalid string.  Skip. */
         } else {
             sourcePair = malloc(sizeof(TCHAR) * (len + 1));
@@ -295,9 +422,9 @@ int loadEnvironment() {
             }
             mbstowcs(sourcePair, environment[i], len + 1);
 #endif
-            
+
             len = _tcslen(sourcePair);
-            
+
             /* We need a copy of the variable pair so we can split it. */
             pair = malloc(sizeof(TCHAR) * (len + 1));
             if (!pair) {
@@ -308,28 +435,28 @@ int loadEnvironment() {
                 return TRUE;
             }
             _sntprintf(pair, len + 1, TEXT("%s"), sourcePair);
-            
+
             equal = _tcschr(pair, TEXT('='));
             if (equal) {
                 name = pair;
                 value = &(equal[1]);
                 equal[0] = TEXT('\0');
-                
+
                 if (_tcslen(name) <= 0) {
                     name = NULL;
                 }
                 if (_tcslen(value) <= 0) {
                     value = NULL;
                 }
-                
+
                 /* It is possible that the name was empty. */
                 if (name) {
                     setEnv(name, value, ENV_SOURCE_PARENT);
                 }
             }
-            
+
             free(pair);
-    
+
 #ifdef WIN32
             lpszVariable += len + 1;
 #else
@@ -338,25 +465,92 @@ int loadEnvironment() {
         i++;
 #endif
     }
-    
+
+#ifdef _DEBUG
+    log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS, TEXT("Loading Environment complete."));
+#endif
     return FALSE;
 }
 
 /**
- * Dumps the table of environment variables, and their sources.
+ * Updates a string value by making a copy of the original.  Any old value is
+ *  first freed.
  */
-void dumpEnvironment() {
+void updateStringValue(TCHAR **ptr, const TCHAR *value) {
+    if (*ptr != NULL) {
+        free(*ptr);
+        *ptr = NULL;
+    }
+
+    if (value != NULL) {
+        *ptr = malloc(sizeof(TCHAR) * (_tcslen(value) + 1));
+        if (!(*ptr)) {
+            outOfMemory(TEXT("USV"), 1);
+            /* TODO: This is pretty bad.  Not sure how to recover... */
+        } else {
+            _tcsncpy(*ptr, value, _tcslen(value) + 1);
+        }
+    }
+}
+
+#ifndef WIN32 /* UNIX */
+int getSignalMode(const TCHAR *modeName, int defaultMode) {
+    if (!modeName) {
+        return defaultMode;
+    }
+
+    if (strcmpIgnoreCase(modeName, TEXT("IGNORE")) == 0) {
+        return WRAPPER_SIGNAL_MODE_IGNORE;
+    } else if (strcmpIgnoreCase(modeName, TEXT("RESTART")) == 0) {
+        return WRAPPER_SIGNAL_MODE_RESTART;
+    } else if (strcmpIgnoreCase(modeName, TEXT("SHUTDOWN")) == 0) {
+        return WRAPPER_SIGNAL_MODE_SHUTDOWN;
+    } else if (strcmpIgnoreCase(modeName, TEXT("FORWARD")) == 0) {
+        return WRAPPER_SIGNAL_MODE_FORWARD;
+    } else {
+        return defaultMode;
+    }
+}
+
+/**
+ * Return FALSE if successful, TRUE if there were problems.
+ */
+int wrapperBuildUnixDaemonInfo() {
+    if (!wrapperData->configured) {
+        /** Get the daemonize flag. */
+        wrapperData->daemonize = getBooleanProperty(properties, TEXT("wrapper.daemonize"), FALSE);
+        /** Configure the HUP signal handler. */
+        wrapperData->signalHUPMode = getSignalMode(getStringProperty(properties, TEXT("wrapper.signal.mode.hup"), NULL), WRAPPER_SIGNAL_MODE_FORWARD);
+
+        /** Configure the USR1 signal handler. */
+        wrapperData->signalUSR1Mode = getSignalMode(getStringProperty(properties, TEXT("wrapper.signal.mode.usr1"), NULL), WRAPPER_SIGNAL_MODE_FORWARD);
+
+        /** Configure the USR2 signal handler. */
+        wrapperData->signalUSR2Mode = getSignalMode(getStringProperty(properties, TEXT("wrapper.signal.mode.usr2"), NULL), WRAPPER_SIGNAL_MODE_FORWARD);
+    }
+
+    return FALSE;
+}
+#endif
+
+
+/**
+ * Dumps the table of environment variables, and their sources.
+ *
+ * @param logLevel Level at which to log the output.
+ */
+void dumpEnvironment(int logLevel) {
     EnvSrc *envSrc;
     TCHAR *envVal;
-    
-    log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_INFO, TEXT(""));
-    log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_INFO, TEXT("Environment variables (Source | Name=Value) BEGIN:"));
-    
+
+    log_printf(WRAPPER_SOURCE_WRAPPER, logLevel, TEXT(""));
+    log_printf(WRAPPER_SOURCE_WRAPPER, logLevel, TEXT("Environment variables (Source | Name=Value) BEGIN:"));
+
     envSrc = baseEnvSrc;
     while (envSrc) {
         envVal = _tgetenv(envSrc->name);
-        
-        log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_INFO, TEXT("  %c%c%c%c%c | %s=%s"),
+
+        log_printf(WRAPPER_SOURCE_WRAPPER, logLevel, TEXT("  %c%c%c%c%c | %s=%s"),
             (envSrc->source & ENV_SOURCE_PARENT ? TEXT('P') : TEXT('-')),
 #ifdef WIN32
             (envSrc->source & ENV_SOURCE_REG_SYSTEM ? TEXT('S') : TEXT('-')),
@@ -370,27 +564,140 @@ void dumpEnvironment() {
             envSrc->name,
             (envVal ? envVal : TEXT("<null>"))
         );
-        
+
 #if !defined(WIN32) && defined(UNICODE)
         if (envVal) {
             free(envVal);
         }
 #endif
-        
+
         envSrc = envSrc->next;
     }
-    log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_INFO, TEXT("Environment variables END:"));
-    log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_INFO, TEXT(""));
+    log_printf(WRAPPER_SOURCE_WRAPPER, logLevel, TEXT("Environment variables END:"));
+    log_printf(WRAPPER_SOURCE_WRAPPER, logLevel, TEXT(""));
 }
 
+void wrapperLoadLoggingProperties(int preload) {
+    const TCHAR *logfilePath;
+    int logfileRollMode;
+    
+    setLogPropertyWarnings(properties, !preload);
+    
+    setLogPropertyWarningLogLevel(properties, getLogLevelForName(getStringProperty(properties, TEXT("wrapper.property_warning.loglevel"), TEXT("WARN"))));
+
+    setLogWarningThreshold(getIntProperty(properties, TEXT("wrapper.log.warning.threshold"), 0));
+    wrapperData->logLFDelayThreshold = propIntMax(propIntMin(getIntProperty(properties, TEXT("wrapper.log.lf_delay.threshold"), 500), 3600000), 0);
+
+    logfilePath = getFileSafeStringProperty(properties, TEXT("wrapper.logfile"), TEXT("wrapper.log"));
+    setLogfilePath(logfilePath, wrapperData->workingDir, preload);
+
+    logfileRollMode = getLogfileRollModeForName(getStringProperty(properties, TEXT("wrapper.logfile.rollmode"), TEXT("SIZE")));
+    if (logfileRollMode == ROLL_MODE_UNKNOWN) {
+        log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_WARN,
+        TEXT("wrapper.logfile.rollmode invalid.  Disabling log file rolling."));
+        logfileRollMode = ROLL_MODE_NONE;
+    } else if (logfileRollMode == ROLL_MODE_DATE) {
+        if (!_tcsstr(logfilePath, ROLL_MODE_DATE_TOKEN)) {
+            log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_WARN,
+                TEXT("wrapper.logfile must contain \"%s\" for a roll mode of DATE.  Disabling log file rolling."),
+                ROLL_MODE_DATE_TOKEN);
+            logfileRollMode = ROLL_MODE_NONE;
+        }
+    }
+    setLogfileRollMode(logfileRollMode);
+
+    /* Load log file format */
+    setLogfileFormat(getStringProperty(properties, TEXT("wrapper.logfile.format"), LOG_FORMAT_LOGFILE_DEFAULT));
+
+    /* Load log file log level */
+    setLogfileLevel(getStringProperty(properties, TEXT("wrapper.logfile.loglevel"), TEXT("INFO")));
+
+    /* Load max log filesize log level */
+    setLogfileMaxFileSize(getStringProperty(properties, TEXT("wrapper.logfile.maxsize"), TEXT("0")));
+
+    /* Load log files level */
+    setLogfileMaxLogFiles(getIntProperty(properties, TEXT("wrapper.logfile.maxfiles"), 0));
+
+    /* Load log file purge pattern */
+    setLogfilePurgePattern(getFileSafeStringProperty(properties, TEXT("wrapper.logfile.purge.pattern"), TEXT("")));
+
+    /* Load log file purge sort */
+    setLogfilePurgeSortMode(wrapperFileGetSortMode(getStringProperty(properties, TEXT("wrapper.logfile.purge.sort"), TEXT("TIMES"))));
+
+    /* Get the close timeout. */
+    wrapperData->logfileCloseTimeout = propIntMax(propIntMin(getIntProperty(properties, TEXT("wrapper.logfile.close.timeout"), getIntProperty(properties, TEXT("wrapper.logfile.inactivity.timeout"), 1)), 3600), -1);
+    setLogfileAutoClose(wrapperData->logfileCloseTimeout == 0);
+    
+    /* Get the flush timeout. */
+    wrapperData->logfileFlushTimeout = propIntMax(propIntMin(getIntProperty(properties, TEXT("wrapper.logfile.flush.timeout"), 1), 3600), 0);
+    setLogfileAutoFlush(wrapperData->logfileFlushTimeout == 0);
+
+    /* Load console format */
+    setConsoleLogFormat(getStringProperty(properties, TEXT("wrapper.console.format"), LOG_FORMAT_CONSOLE_DEFAULT));
+
+    setConsoleLogLevel(getStringProperty(properties, TEXT("wrapper.console.loglevel"), TEXT("INFO")));
+
+    /* Load the console flush flag. */
+    setConsoleFlush(getBooleanProperty(properties, TEXT("wrapper.console.flush"), FALSE));
+
+#ifdef WIN32
+    /* Load the console direct flag. */
+    setConsoleDirect(getBooleanProperty(properties, TEXT("wrapper.console.direct"), TRUE));
+#endif
+
+    /* Load the console loglevel targets. */
+    setConsoleFatalToStdErr(getBooleanProperty(properties, TEXT("wrapper.console.fatal_to_stderr"), TRUE));
+    setConsoleErrorToStdErr(getBooleanProperty(properties, TEXT("wrapper.console.error_to_stderr"), TRUE));
+    setConsoleWarnToStdErr(getBooleanProperty(properties, TEXT("wrapper.console.warn_to_stderr"), FALSE));
+
+
+    /* Load syslog log level */
+    setSyslogLevel(getStringProperty(properties, TEXT("wrapper.syslog.loglevel"), TEXT("NONE")));
+
+#ifndef WIN32
+    /* Load syslog facility */
+    setSyslogFacility(getStringProperty(properties, TEXT("wrapper.syslog.facility"), TEXT("USER")));
+#endif
+
+    /* Load syslog event source name */
+    setSyslogEventSourceName(getStringProperty(properties, TEXT("wrapper.syslog.ident"), getStringProperty(properties, TEXT("wrapper.name"), getStringProperty(properties, TEXT("wrapper.ntservice.name"), TEXT("wrapper")))));
+
+    /* Register the syslog message file if syslog is enabled */
+    if (getSyslogLevelInt() < LEVEL_NONE) {
+        registerSyslogMessageFile();
+    }
+
+
+    /* Get the debug status (Property is deprecated but flag is still used) */
+    wrapperData->isDebugging = getBooleanProperty(properties, TEXT("wrapper.debug"), FALSE);
+    if (wrapperData->isDebugging) {
+        /* For backwards compatability */
+        setConsoleLogLevelInt(LEVEL_DEBUG);
+        setLogfileLevelInt(LEVEL_DEBUG);
+    } else {
+        if (getLowLogLevel() <= LEVEL_DEBUG) {
+            wrapperData->isDebugging = TRUE;
+        }
+    }
+}
+
+
+
 /**
+ * Load the configuration.
+ *
+ * @param preload TRUE if the configuration is being preloaded.
+ *
  * Return TRUE if there were any problems.
  */
-int wrapperLoadConfigurationProperties() {
+int wrapperLoadConfigurationProperties(int preload) {
     int i;
     int firstCall;
 #ifdef WIN32
     int work;
+    int defaultUMask;
+#else 
+    mode_t defaultUMask;
 #endif
     const TCHAR* prop;
 
@@ -401,7 +708,9 @@ int wrapperLoadConfigurationProperties() {
         properties = NULL;
     } else {
         firstCall = TRUE;
-
+        if (wrapperData->originalWorkingDir) {
+            free(wrapperData->originalWorkingDir);
+        }
         /* This is the first time, so preserve the working directory. */
 #ifdef WIN32
         /* Get buffer size, including '\0' */
@@ -436,7 +745,9 @@ int wrapperLoadConfigurationProperties() {
             return TRUE;
         }
 #endif
-
+        if (wrapperData->configFile) {
+            free(wrapperData->configFile);
+        }
         /* This is the first time, so preserve the full canonical location of the
          *  configuration file. */
 #ifdef WIN32
@@ -476,17 +787,21 @@ int wrapperLoadConfigurationProperties() {
              *  file that could not be found.  May not be the config file directly if symbolic
              *  links are involved. */
             if (wrapperData->argConfFileDefault) {
+                /* The output buffer is likely to contain undefined data.
+                 * To be on the safe side and in order to report the error
+                 *  below correctly we need to override the data first.*/
+                _sntprintf(wrapperData->configFile, PATH_MAX + 1, TEXT("%s"), wrapperData->argConfFile);
                 /* This was the default config file name.  We know that the working directory
                  *  could be resolved so the problem must be that the default config file does
                  *  not exist.  This problem will be reported later and the wrapperData->configFile
                  *  variable will have the correct full path.
                  * Fall through for now and the user will get a better error later. */
             } else {
-                log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_FATAL, TEXT(
-                    "Unable to open configuration file, %s: %s"),
-                    wrapperData->argConfFile, getLastErrorText());
-                log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_FATAL, TEXT(
-                    "Current working directory is: %s"), wrapperData->originalWorkingDir);
+                if (!preload) {
+                    log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_FATAL, TEXT(
+                        "Unable to open configuration file: %s (%s)\n  Current working directory: %s"),
+                        wrapperData->argConfFile, getLastErrorText(), wrapperData->originalWorkingDir);
+                }
                 return TRUE;
             }
         }
@@ -498,41 +813,54 @@ int wrapperLoadConfigurationProperties() {
     if (!properties) {
         return TRUE;
     }
+    
+    setLogPropertyWarnings(properties, !preload);
+    
     wrapperAddDefaultProperties();
+
 
     /* The argument prior to the argBase will be the configuration file, followed
      *  by 0 or more command line properties.  The command line properties need to be
      *  loaded first, followed by the configuration file. */
-    for (i = 0; i < wrapperData->argCount; i++) {
-        if (addPropertyPair(properties, wrapperData->argValues[i], TRUE, TRUE, FALSE)) {
-            log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_FATAL,
-                TEXT("The argument '%s' is not a valid property name-value pair."),
-                wrapperData->argValues[i]);
-            return TRUE;
+    if (strcmpIgnoreCase(wrapperData->argCommand, TEXT("-translate")) != 0) {
+        for (i = 0; i < wrapperData->argCount; i++) {
+            if (addPropertyPair(properties, NULL, 0, wrapperData->argValues[i], TRUE, TRUE, FALSE)) {
+                log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_FATAL,
+                    TEXT("The argument '%s' is not a valid property name-value pair."),
+                    wrapperData->argValues[i]);
+                return TRUE;
+            }
         }
     }
+
     /* Now load the configuration file.
      *  When this happens, the working directory MUST be set to the original working dir. */
-    if (loadProperties(properties, wrapperData->configFile)) {
+#ifdef WIN32
+    if (loadProperties(properties, wrapperData->configFile, preload)) {
+#else
+    if (loadProperties(properties, wrapperData->configFile, (preload | wrapperData->daemonize))) {
+#endif
         /* File not found. */
         /* If this was a default file name then we don't want to show this as
          *  an error here.  It will be handled by the caller. */
         /* Debug is not yet available as the config file is not yet loaded. */
-        if (!wrapperData->argConfFileDefault) {
-            log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_FATAL,
-               TEXT("Unable to open configuration file. %s"), wrapperData->configFile);
+        if ((!preload) && (!wrapperData->argConfFileDefault)) {
+            log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_FATAL, TEXT("Failed to load configuration: %s"), wrapperData->configFile);
         }
         return TRUE;
     }
 
     /* Config file found. */
     wrapperData->argConfFileFound = TRUE;
-
+    
     if (firstCall) {
         /* If the working dir was configured, we need to extract it and preserve its value.
          *  This must be done after the configuration has been completely loaded. */
-        prop = getStringProperty(properties, TEXT("wrapper.working.dir"), NULL);
+        prop = getStringProperty(properties, TEXT("wrapper.working.dir"), TEXT("."));
         if (prop && (_tcslen(prop) > 0)) {
+            if (wrapperData->workingDir) {
+                free(wrapperData->workingDir);
+            }
 #ifdef WIN32
             work = GetFullPathName(prop, 0, NULL, NULL);
             if (!work) {
@@ -567,22 +895,51 @@ int wrapperLoadConfigurationProperties() {
 #endif
         }
     }
-    
+
 #ifdef _DEBUG
     /* Display the active properties */
     _tprintf(TEXT("Debug Configuration Properties:\n"));
     dumpProperties(properties);
 #endif
-    
+
     /* Now that the configuration is loaded, we need to update the working directory if the user specified one.
      *  This must be done now so that anything that references the working directory, including the log file
      *  and language pack locations will work correctly. */
-    if (wrapperData->workingDir && wrapperSetWorkingDir(wrapperData->workingDir)) {
+    if (wrapperData->workingDir && wrapperSetWorkingDir(wrapperData->workingDir, !preload)) {
         return TRUE;
     }
     
+        if (wrapperData->umask == -1) {
+        /** Get the umask value for the various files. */
+#ifdef WIN32
+            defaultUMask = _umask(0);
+            _umask(defaultUMask);
+#else
+            defaultUMask = umask((mode_t)0);
+            umask(defaultUMask);
+#endif    
+            wrapperData->umask = getIntProperty(properties, TEXT("wrapper.umask"), defaultUMask);
+        }
+        wrapperData->javaUmask = getIntProperty(properties, TEXT("wrapper.java.umask"), wrapperData->umask);
+        wrapperData->pidFileUmask = getIntProperty(properties, TEXT("wrapper.pidfile.umask"), wrapperData->umask);
+        wrapperData->lockFileUmask = getIntProperty(properties, TEXT("wrapper.lockfile.umask"), wrapperData->umask);
+        wrapperData->javaPidFileUmask = getIntProperty(properties, TEXT("wrapper.java.pidfile.umask"), wrapperData->umask);
+        wrapperData->javaIdFileUmask = getIntProperty(properties, TEXT("wrapper.java.idfile.umask"), wrapperData->umask);
+        wrapperData->statusFileUmask = getIntProperty(properties, TEXT("wrapper.statusfile.umask"), wrapperData->umask);
+        wrapperData->javaStatusFileUmask = getIntProperty(properties, TEXT("wrapper.java.statusfile.umask"), wrapperData->umask);
+        wrapperData->anchorFileUmask = getIntProperty(properties, TEXT("wrapper.anchorfile.umask"), wrapperData->umask);
+        setLogfileUmask(getIntProperty(properties, TEXT("wrapper.logfile.umask"), wrapperData->umask));
+#ifndef WIN32
+    /** If in the first call here and the wrapper will deamonize, then we don't need
+     * to proceed any further anymore as the properties will be loaded properly at
+     * the second time...
+     */
+    if ((firstCall == TRUE) && (!wrapperBuildUnixDaemonInfo()) && wrapperData->daemonize) {
+        return FALSE;
+    }
+#endif
     /* Load the configuration. */
-    if (loadConfiguration()) {
+    if ((strcmpIgnoreCase(wrapperData->argCommand, TEXT("-translate")) != 0) && loadConfiguration()) {
         log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_FATAL,
             TEXT("Problem loading wrapper configuration file: %s"), wrapperData->configFile);
         return TRUE;
@@ -602,7 +959,31 @@ void wrapperGetCurrentTime(struct timeb *timeBuffer) {
 #endif
 }
 
-void protocolStopServer() {
+/**
+ *  This function stops the pipes (quite in a brutal way)
+ */
+void protocolStopServerPipe() {
+    if (protocolActiveServerPipeIn != INVALID_HANDLE_VALUE) {
+#ifdef WIN32
+        CloseHandle(protocolActiveServerPipeIn);
+#else
+        close(protocolActiveServerPipeIn);
+#endif
+        protocolActiveServerPipeIn = INVALID_HANDLE_VALUE;
+        log_printf(WRAPPER_SOURCE_PROTOCOL, LEVEL_INFO, TEXT("backend pipe closed."));
+    }
+    if (protocolActiveServerPipeOut != INVALID_HANDLE_VALUE) {
+#ifdef WIN32
+        CloseHandle(protocolActiveServerPipeOut);
+#else
+        close(protocolActiveServerPipeOut);
+#endif
+        protocolActiveServerPipeOut = INVALID_HANDLE_VALUE;
+        log_printf(WRAPPER_SOURCE_PROTOCOL, LEVEL_INFO, TEXT("backend pipe closed."));
+    }
+}
+
+void protocolStopServerSocket() {
     int rc;
 
     /* Close the socket. */
@@ -626,11 +1007,89 @@ void protocolStopServer() {
     wrapperData->actualPort = 0;
 }
 
-void protocolStartServer() {
+void protocolStopServer() {
+    if (wrapperData->backendType == WRAPPER_BACKEND_TYPE_PIPE) {
+        protocolStopServerPipe();
+    } else {
+        protocolStopServerSocket();
+    }
+}
+int protocolActiveServerPipeStarted = FALSE;
+void protocolStartServerPipe() {
+    size_t pipeNameLen;
+    TCHAR *pipeName;
+
+#ifdef WIN32
+    pipeNameLen = 17 + 10 + 1 + 10 + 3;
+#else
+    pipeNameLen = 12 + 10 + 1 + 10 + 3;
+#endif
+    pipeName = malloc(sizeof(TCHAR) * (pipeNameLen + 1));
+    if (!pipeName) {
+        outOfMemory(TEXT("PSSP"), 1);
+        return;
+    }
+#ifdef WIN32
+    _sntprintf(pipeName, pipeNameLen, TEXT("\\\\.\\pipe\\wrapper-%d-%d-out"), wrapperData->wrapperPID, wrapperData->jvmRestarts + 1);
+    if ((protocolActiveServerPipeOut = CreateNamedPipe(pipeName,
+                                                    PIPE_ACCESS_OUTBOUND,/* + FILE_FLAG_FIRST_PIPE_INSTANCE, */
+                                                    PIPE_TYPE_MESSAGE |       /* message type pipe */
+                                                    PIPE_READMODE_MESSAGE |   /* message-read mode */
+                                                    PIPE_NOWAIT,              /* nonblocking mode */
+                                                    1,  /* only allow 1 connection at a time */
+                                                    32768,
+                                                    32768,
+                                                    0,
+                                                    NULL)) == INVALID_HANDLE_VALUE) {
+#else
+    _sntprintf(pipeName, pipeNameLen, TEXT("/tmp/wrapper-%d-%d-out"), wrapperData->wrapperPID, wrapperData->jvmRestarts + 1);
+    if (_tmkfifo(pipeName, S_IWUSR | S_IRUSR | S_IRGRP | S_IROTH) == INVALID_HANDLE_VALUE) {
+
+#endif
+
+        log_printf(WRAPPER_SOURCE_PROTOCOL, LEVEL_ERROR, TEXT("Unable to create backend pipe: %s"), getLastErrorText());
+        free(pipeName);
+        return;
+    }
+    if (wrapperData->isDebugging) {
+        log_printf(WRAPPER_SOURCE_PROTOCOL, LEVEL_DEBUG, TEXT("server listening on pipe %s."), pipeName);
+    }
+#ifdef WIN32
+    _sntprintf(pipeName, pipeNameLen, TEXT("\\\\.\\pipe\\wrapper-%d-%d-in"), wrapperData->wrapperPID, wrapperData->jvmRestarts + 1);
+    if ((protocolActiveServerPipeIn = CreateNamedPipe(pipeName,
+                                                    PIPE_ACCESS_INBOUND,/* + FILE_FLAG_FIRST_PIPE_INSTANCE,*/
+                                                    PIPE_TYPE_MESSAGE |       /* message type pipe */
+                                                    PIPE_READMODE_MESSAGE |   /* message-read mode*/
+                                                    PIPE_NOWAIT,              /* nonblocking mode*/
+                                                    1,
+                                                    32768,
+                                                    32768,
+                                                    0,
+                                                    NULL)) == INVALID_HANDLE_VALUE) {
+#else
+    _sntprintf(pipeName, pipeNameLen, TEXT("/tmp/wrapper-%d-%d-in"), wrapperData->wrapperPID, wrapperData->jvmRestarts + 1);
+    if (_tmkfifo(pipeName, S_IWUSR | S_IRUSR | S_IRGRP | S_IROTH) == INVALID_HANDLE_VALUE) {
+#endif
+        log_printf(WRAPPER_SOURCE_PROTOCOL, LEVEL_ERROR, TEXT("Unable to create backend pipe: %s"), getLastErrorText());
+        free(pipeName);
+        return;
+    }
+    if (wrapperData->isDebugging) {
+        log_printf(WRAPPER_SOURCE_PROTOCOL, LEVEL_DEBUG, TEXT("server listening on pipe %s."), pipeName);
+    }
+    protocolActiveServerPipeStarted = TRUE;
+    free(pipeName);
+}
+
+void protocolStartServerSocket() {
     struct sockaddr_in addr_srv;
     int rc;
     int port;
     int fixedPort;
+#ifdef UNICODE
+    char* tempAddress;
+    size_t len;
+#endif
 
     /*int optVal;*/
 #ifdef WIN32
@@ -700,7 +1159,45 @@ void protocolStartServer() {
     memset(&addr_srv, 0, sizeof(addr_srv));
 
     addr_srv.sin_family = AF_INET;
-    addr_srv.sin_addr.s_addr = inet_addr("127.0.0.1");
+    if (wrapperData->portAddress == NULL) {
+        addr_srv.sin_addr.s_addr = inet_addr("127.0.0.1");
+    } else {
+#ifdef UNICODE
+#ifdef WIN32
+        len = WideCharToMultiByte(CP_OEMCP, 0, wrapperData->portAddress, -1, NULL, 0, NULL, NULL);
+        if (len <= 0) {
+            log_printf(WRAPPER_SOURCE_PROTOCOL, LEVEL_WARN,
+                TEXT("Invalid multibyte sequence in port address \"%s\" : %s"), wrapperData->portAddress, getLastErrorText());
+            return;
+        }
+        tempAddress = malloc(len);
+        if (!tempAddress) {
+            outOfMemory(TEXT("PSSS"), 1);
+            return;
+        }
+        WideCharToMultiByte(CP_OEMCP, 0, wrapperData->portAddress, -1, tempAddress, (int)len, NULL, NULL);
+#else
+        len = wcstombs(NULL, wrapperData->portAddress, 0) + 1;
+        _tprintf(TEXT("%d  hanth %s\n"), len, wrapperData->portAddress);
+        if (len == (size_t)-1) {
+            log_printf(WRAPPER_SOURCE_PROTOCOL, LEVEL_WARN,
+                TEXT("Invalid multibyte sequence in port address \"%s\" : %s"), wrapperData->portAddress, getLastErrorText());
+            return;
+        }
+        tempAddress = malloc(len);
+        if (!tempAddress) {
+            outOfMemory(TEXT("PSSS"), 2);
+            return;
+        }
+        wcstombs(tempAddress, wrapperData->portAddress, len);
+        _tprintf(TEXT("%d  hanth % s\n"), len, tempAddress);
+#endif
+        addr_srv.sin_addr.s_addr = inet_addr(tempAddress);
+        free(tempAddress);
+#else 
+        addr_srv.sin_addr.s_addr = inet_addr(wrapperData->portAddress);
+#endif
+    }
     addr_srv.sin_port = htons((u_short)port);
 #ifdef WIN32
     rc = bind(protocolActiveServerSD, (struct sockaddr FAR *)&addr_srv, sizeof(addr_srv));
@@ -712,7 +1209,12 @@ void protocolStartServer() {
         rc = wrapperGetLastError();
 
         /* The specified port could bot be bound. */
-        if (rc == EADDRINUSE) {
+        if (rc == EADDRINUSE ||
+#ifdef WIN32
+            rc == WSAEACCES) {
+#else 
+            rc == EACCES) {
+#endif
             /* Address in use, try looking at the next one. */
             if (fixedPort) {
                 /* The last port checked was the defined fixed port, switch to the dynamic range. */
@@ -730,15 +1232,15 @@ void protocolStartServer() {
         /* Log an error.  This is fatal, so die. */
         if (wrapperData->port <= 0) {
             log_printf(WRAPPER_SOURCE_PROTOCOL, LEVEL_FATAL,
-                TEXT("unable to bind listener to any port in the range %d-%d. (%s)"),
+                TEXT("unable to bind listener to any port in the range %d to %d. (%s)"),
                 wrapperData->portMin, wrapperData->portMax, getLastErrorText());
         } else {
             log_printf(WRAPPER_SOURCE_PROTOCOL, LEVEL_FATAL,
-                TEXT("unable to bind listener port %d, or any port in the range %d-%d. (%s)"),
+                TEXT("unable to bind listener port %d, or any port in the range %d to %d. (%s)"),
                 wrapperData->port, wrapperData->portMin, wrapperData->portMax, getLastErrorText());
         }
 
-        wrapperStopProcess(getLastError());
+        wrapperStopProcess(getLastError(), TRUE);
         wrapperProtocolClose();
         protocolStopServer();
         wrapperData->exitRequested = TRUE;
@@ -766,10 +1268,62 @@ void protocolStartServer() {
     }
 }
 
-/**
- * Attempt to accept a connection from a JVM client.
- */
-void protocolOpen() {
+void protocolStartServer() {
+    if (wrapperData->backendType == WRAPPER_BACKEND_TYPE_PIPE) {
+        protocolStartServerPipe();
+    } else {
+        protocolStartServerSocket();
+    }
+}
+
+/* this functions connects the pipes once the other end is there */
+void protocolOpenPipe() {
+#ifdef WIN32
+    int result;
+    result = ConnectNamedPipe(protocolActiveServerPipeOut, NULL);
+
+    if (GetLastError() == ERROR_PIPE_LISTENING) {
+        return;
+    }
+
+    result = ConnectNamedPipe(protocolActiveServerPipeIn, NULL);
+    if (GetLastError() == ERROR_PIPE_LISTENING) {
+        return;
+    }
+    if ((result == 0) && (GetLastError() != ERROR_PIPE_CONNECTED) && (GetLastError() != ERROR_NO_DATA)) {
+        log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_FATAL, TEXT("Pipe connect failed: %s"), getLastErrorText());
+        return;
+    }
+#else
+    size_t pipeNameLen;
+    TCHAR *pipeName;
+    pipeNameLen = 12 + 10 + 1 + 10 + 3;
+    pipeName = malloc(sizeof(TCHAR) * (pipeNameLen + 1));
+    if (!pipeName) {
+        outOfMemory(TEXT("PSSP"), 1);
+        return;
+    }
+    _sntprintf(pipeName, pipeNameLen, TEXT("/tmp/wrapper-%d-%d-out"), wrapperData->wrapperPID, wrapperData->jvmRestarts);
+    protocolActiveServerPipeOut = _topen(pipeName, O_WRONLY | O_NONBLOCK, S_IWUSR | S_IRUSR);
+
+    if (protocolActiveServerPipeOut == INVALID_HANDLE_VALUE) {
+        free(pipeName);
+        return;
+    }
+
+    _sntprintf(pipeName, pipeNameLen, TEXT("/tmp/wrapper-%d-%d-in"), wrapperData->wrapperPID, wrapperData->jvmRestarts);
+    protocolActiveServerPipeIn = _topen(pipeName, O_RDONLY  | O_NONBLOCK,  S_IRUSR);
+    if (protocolActiveServerPipeIn == INVALID_HANDLE_VALUE) {
+        free(pipeName);
+        return;
+    }
+    free(pipeName);
+#endif
+
+    protocolActiveServerPipeConnected = TRUE;
+}
+
+void protocolOpenSocket() {
     struct sockaddr_in addr_srv;
     int rc;
 #if defined(WIN32)
@@ -787,7 +1341,7 @@ void protocolOpen() {
         /* can't do anything yet. */
         return;
     }
-    
+
     /* Try accepting a socket. */
     addr_srv_len = sizeof(addr_srv);
 #ifdef WIN32
@@ -826,10 +1380,10 @@ void protocolOpen() {
         }
         return;
     }
-    
+
     /* New connection, so continue. */
     protocolActiveBackendSD = newBackendSD;
-    
+
     if (wrapperData->isDebugging) {
 #ifdef UNICODE
         TCHAR* socketSource;
@@ -882,15 +1436,71 @@ void protocolOpen() {
 }
 
 /**
- * Close the backend socket.
+ * Attempt to accept a connection from a JVM client.
  */
-void wrapperProtocolClose() {
+void protocolOpen() {
+    if (wrapperData->backendType == WRAPPER_BACKEND_TYPE_PIPE) {
+        protocolOpenPipe();
+    } else {
+        protocolOpenSocket();
+    }
+}
+
+void protocolClosePipe() {
+#ifndef WIN32
+    size_t pipeNameLen;
+    TCHAR *pipeName;
+
+   
+    pipeNameLen = 12 + 10 + 1 + 10 + 3;
+#endif
+    if (protocolActiveServerPipeConnected) {
+        if (wrapperData->isDebugging) {
+            log_printf(WRAPPER_SOURCE_PROTOCOL, LEVEL_DEBUG, TEXT("Closing backend pipe."));
+        }
+#ifdef WIN32
+        if (protocolActiveServerPipeIn != INVALID_HANDLE_VALUE && !CloseHandle(protocolActiveServerPipeIn)) {
+#else
+        if (close(protocolActiveServerPipeIn) == -1) {
+#endif
+            log_printf(WRAPPER_SOURCE_PROTOCOL, LEVEL_ERROR, TEXT("Failed to close backend pipe: %s"), getLastErrorText());
+        }
+
+#ifdef WIN32
+        if (protocolActiveServerPipeOut != INVALID_HANDLE_VALUE && !CloseHandle(protocolActiveServerPipeOut)) {
+#else
+        if (close(protocolActiveServerPipeOut) == -1) {
+#endif
+            log_printf(WRAPPER_SOURCE_PROTOCOL, LEVEL_ERROR, TEXT("Failed to close backend pipe: %s"), getLastErrorText());
+        }
+        
+#ifndef WIN32
+        pipeName = malloc(sizeof(TCHAR) * (pipeNameLen + 1));
+        if (!pipeName) {
+            outOfMemory(TEXT("PCP"), 1);
+            return;
+        }
+
+        _sntprintf(pipeName, pipeNameLen, TEXT("/tmp/wrapper-%d-%d-in"), wrapperData->wrapperPID, wrapperData->jvmRestarts);
+        _tunlink(pipeName);
+        _sntprintf(pipeName, pipeNameLen, TEXT("/tmp/wrapper-%d-%d-out"), wrapperData->wrapperPID, wrapperData->jvmRestarts);
+        _tunlink(pipeName);
+#endif
+
+        protocolActiveServerPipeConnected = FALSE;
+        protocolActiveServerPipeStarted = FALSE;
+        protocolActiveServerPipeIn = INVALID_HANDLE_VALUE;
+        protocolActiveServerPipeOut = INVALID_HANDLE_VALUE;
+    }
+}
+
+void protocolCloseSocket() {
     int rc;
 
     /* Close the socket. */
     if (protocolActiveBackendSD != INVALID_SOCKET) {
         if (wrapperData->isDebugging) {
-            log_printf(WRAPPER_SOURCE_PROTOCOL, LEVEL_DEBUG, TEXT("closing backend socket."));
+            log_printf(WRAPPER_SOURCE_PROTOCOL, LEVEL_DEBUG, TEXT("Closing backend socket."));
         }
 #ifdef WIN32
         rc = closesocket(protocolActiveBackendSD);
@@ -903,6 +1513,17 @@ void wrapperProtocolClose() {
             }
         }
         protocolActiveBackendSD = INVALID_SOCKET;
+    }
+}
+
+/**
+ * Close the backend socket.
+ */
+void wrapperProtocolClose() {
+    if (wrapperData->backendType == WRAPPER_BACKEND_TYPE_PIPE) {
+        protocolClosePipe();
+    } else {
+        protocolCloseSocket();
     }
 }
 
@@ -958,7 +1579,7 @@ TCHAR *wrapperProtocolGetCodeName(char code) {
         name = TEXT("LOW_LOG_LEVEL");
         break;
 
-    case WRAPPER_MSG_PING_TIMEOUT:
+    case WRAPPER_MSG_PING_TIMEOUT: /* No longer used. */
         name = TEXT("PING_TIMEOUT");
         break;
 
@@ -994,15 +1615,34 @@ TCHAR *wrapperProtocolGetCodeName(char code) {
         name = TEXT("LOG(FATAL)");
         break;
 
+    case WRAPPER_MSG_LOG + LEVEL_ADVICE:
+        name = TEXT("LOG(ADVICE)");
+        break;
+
+    case WRAPPER_MSG_LOG + LEVEL_NOTICE:
+        name = TEXT("LOG(NOTICE)");
+        break;
+
     case WRAPPER_MSG_LOGFILE:
         name = TEXT("LOGFILE");
         break;
 
-
-    case WRAPPER_MSG_APPEAR_ORPHAN:
+    case WRAPPER_MSG_APPEAR_ORPHAN: /* No longer used. */
         name = TEXT("APPEAR_ORPHAN");
         break;
 
+    case WRAPPER_MSG_PAUSE:
+        name = TEXT("PAUSE");
+        break;
+
+    case WRAPPER_MSG_RESUME:
+        name = TEXT("RESUME");
+        break;
+
+    case WRAPPER_MSG_GC:
+        name = TEXT("GC");
+        break;
+        
     default:
         _sntprintf(unknownBuffer, 14, TEXT("UNKNOWN(%d)"), code);
         name = unknownBuffer;
@@ -1078,7 +1718,7 @@ char *protocolSendBuffer = NULL;
  */
 int wrapperProtocolFunction(char function, const TCHAR *messageW) {
     int rc;
-    int cnt;
+    int cnt, inWritten;
     size_t len;
     const TCHAR *logMsgW;
     char *messageMB = NULL;
@@ -1095,17 +1735,6 @@ int wrapperProtocolFunction(char function, const TCHAR *messageW) {
         logMsgW = TEXT("(Property Values)");
     } else {
         logMsgW = messageW;
-    }
-
-    /* If we are in the orphaned JVM test mode then don't do anything. */
-    if (wrapperData->isJVMOrphaned) {
-        if (wrapperData->isDebugging) {
-            log_printf(WRAPPER_SOURCE_PROTOCOL, LEVEL_DEBUG, TEXT(
-                "Orphan Mode.  Skip sending packet %s : %s"),
-                wrapperProtocolGetCodeName(function), (messageW == NULL ? TEXT("NULL") : logMsgW));
-        }
-        returnVal = FALSE;
-        ok = FALSE;
     }
 
     if (ok) {
@@ -1131,7 +1760,7 @@ int wrapperProtocolFunction(char function, const TCHAR *messageW) {
             }
  #else
             len = wcstombs(NULL, messageW, 0) + 1;
-            if (len < 0) {
+            if (len == (size_t)-1) {
                 log_printf(WRAPPER_SOURCE_PROTOCOL, LEVEL_WARN,
                     TEXT("Invalid multibyte sequence in protocol message \"%s\" : %s"), messageW, getLastErrorText());
                 returnVal = TRUE;
@@ -1155,14 +1784,14 @@ int wrapperProtocolFunction(char function, const TCHAR *messageW) {
                 returnVal = TRUE;
                 ok = FALSE;
             } else {
-                _tcscpy(messageMB, messageW);
+                _tcsncpy(messageMB, messageW, len);
             }
 #endif
         } else {
             messageMB = NULL;
         }
     }
-    
+
     if (ok) {
         /* We need to construct a single string that will be used to transmit the command + message. */
         if (messageMB) {
@@ -1183,7 +1812,7 @@ int wrapperProtocolFunction(char function, const TCHAR *messageW) {
                 /* Build the packet */
                 protocolSendBuffer[0] = function;
                 if (messageMB) {
-                    strcpy(&(protocolSendBuffer[1]), messageMB);
+                    strncpy(&(protocolSendBuffer[1]), messageMB, len - 1);
                 } else {
                     protocolSendBuffer[1] = 0;
                 }
@@ -1193,9 +1822,10 @@ int wrapperProtocolFunction(char function, const TCHAR *messageW) {
             free(messageMB);
         }
     }
-    
+
     if (ok) {
-        if (protocolActiveBackendSD == INVALID_SOCKET) {
+        if (((protocolActiveBackendSD == INVALID_SOCKET) && (wrapperData->backendType == WRAPPER_BACKEND_TYPE_SOCKET))
+            || ((protocolActiveServerPipeConnected == FALSE) && (wrapperData->backendType == WRAPPER_BACKEND_TYPE_PIPE))) {
             /* A socket was not opened */
             if (wrapperData->isDebugging) {
                 log_printf(WRAPPER_SOURCE_PROTOCOL, LEVEL_DEBUG,
@@ -1205,45 +1835,63 @@ int wrapperProtocolFunction(char function, const TCHAR *messageW) {
             returnVal = TRUE;
         } else {
             if (wrapperData->isDebugging) {
-                if ((function == WRAPPER_MSG_PING) && messageW && (_tcscmp(messageW, TEXT("silent")) == 0)) {
+                if ((function == WRAPPER_MSG_PING) && messageW && (_tcsstr(messageW, TEXT("silent")) == messageW)) {
                     /*
-                    log_printf(WRAPPER_SOURCE_PROTOCOL, LEVEL_DEBUG, TEXT(
-                        "send a silent ping packet"));
+                    log_printf(WRAPPER_SOURCE_PROTOCOL, LEVEL_DEBUG,
+                        TEXT("send a silent ping packet %s : %s"),
+                        wrapperProtocolGetCodeName(function), (logMsgW == NULL ? TEXT("NULL") : logMsgW));
                     */
                 } else {
-                    log_printf(WRAPPER_SOURCE_PROTOCOL, LEVEL_DEBUG, TEXT(
-                        "send a packet %s : %s"),
+                    log_printf(WRAPPER_SOURCE_PROTOCOL, LEVEL_DEBUG,
+                        TEXT("send a packet %s : %s"),
                         wrapperProtocolGetCodeName(function), (logMsgW == NULL ? TEXT("NULL") : logMsgW));
                 }
             }
 
-            cnt = 0;
-            do {
-                if (cnt > 0) {
-                    wrapperSleep(FALSE, 10);
+            if (wrapperData->backendType == WRAPPER_BACKEND_TYPE_PIPE) {
+#ifdef WIN32
+                if (WriteFile(protocolActiveServerPipeOut, protocolSendBuffer, sizeof(char) * (int)len, &inWritten, NULL) == FALSE) {
+#else
+                if ((inWritten = write(protocolActiveServerPipeOut, protocolSendBuffer, sizeof(char) * (int)len)) == -1) { 
+#endif
+                    log_printf(WRAPPER_SOURCE_PROTOCOL, LEVEL_FATAL, TEXT("Writing to the backend pipe failed (%d): %s"), wrapperGetLastError(), getLastErrorText());
+                    return FALSE;
                 }
-                rc = send(protocolActiveBackendSD, protocolSendBuffer, sizeof(char) * (int)len, 0);
-                cnt++;
-            } while ((rc == SOCKET_ERROR) && (wrapperGetLastError() == EWOULDBLOCK) && (cnt < 200));
-            if (rc == SOCKET_ERROR) {
-                if (wrapperGetLastError() == EWOULDBLOCK) {
-                    log_printf(WRAPPER_SOURCE_PROTOCOL, LEVEL_WARN, TEXT(
-                        "socket send failed.  Blocked for 2 seconds.  %s"),
-                        getLastErrorText());
-                } else {
-                    if (wrapperData->isDebugging) {
-                        log_printf(WRAPPER_SOURCE_PROTOCOL, LEVEL_DEBUG, TEXT(
-                            "socket send failed.  %s"), getLastErrorText());
-                    }
-                }
-                wrapperProtocolClose();
-                returnVal = TRUE;
             } else {
-                returnVal = FALSE;
+                cnt = 0;
+                do {
+                    if (cnt > 0) {
+                        wrapperSleep(10);
+                    }
+                    rc = send(protocolActiveBackendSD, protocolSendBuffer, sizeof(char) * (int)len, 0);
+
+                    cnt++;
+                } while ((rc == SOCKET_ERROR) && (wrapperGetLastError() == EWOULDBLOCK) && (cnt < 200));
+                if (rc == SOCKET_ERROR) {
+                    if (wrapperGetLastError() == EWOULDBLOCK) {
+                        log_printf(WRAPPER_SOURCE_PROTOCOL, LEVEL_WARN, TEXT(
+                            "socket send failed.  Blocked for 2 seconds.  %s"),
+                            getLastErrorText());
+#ifdef WIN32
+                    } else if (wrapperGetLastError() == WSAECONNRESET) {
+                        log_printf(WRAPPER_SOURCE_PROTOCOL, LEVEL_ERROR, TEXT(
+                            "socket send failed.  %s"), getLastErrorText());
+#endif
+                    } else {
+                        if (wrapperData->isDebugging) {
+                            log_printf(WRAPPER_SOURCE_PROTOCOL, LEVEL_DEBUG, TEXT(
+                                "socket send failed.  %s"), getLastErrorText());
+                        }
+                    }
+                    wrapperProtocolClose();
+                    returnVal = TRUE;
+                } else {
+                    returnVal = FALSE;
+                }
             }
         }
     }
-    
+
     /* Always make sure the mutex is released. */
     if (releaseProtocolMutex()) {
         returnVal = TRUE;
@@ -1252,19 +1900,20 @@ int wrapperProtocolFunction(char function, const TCHAR *messageW) {
 }
 
 /**
- * Checks the status of the server socket.
+ * Checks the status of the server backend.
  *
- * The socket will be initialized if the JVM is in a state where it should
- *  be up, otherwise the socket will be left alone.
+ * The backend will be initialized if the JVM is in a state where it should
+ *  be up, otherwise the backend will be left alone.
  *
  * If the forceOpen flag is set then an attempt will be made to initialize
- *  the socket regardless of the JVM state.
+ *  the backend regardless of the JVM state.
  *
- * Returns TRUE if the socket is open and ready on return, FALSE if not.
+ * Returns TRUE if the backend is open and ready on return, FALSE if not.
  */
-int wrapperCheckServerSocket(int forceOpen) {
-    if (protocolActiveServerSD == INVALID_SOCKET) {
-        /* The socket is not currently open and needs to be started,
+int wrapperCheckServerBackend(int forceOpen) {
+    if (((wrapperData->backendType == WRAPPER_BACKEND_TYPE_SOCKET) && (protocolActiveServerSD == INVALID_SOCKET)) ||
+        ((wrapperData->backendType == WRAPPER_BACKEND_TYPE_PIPE) && (protocolActiveServerPipeStarted == FALSE))) {
+        /* The backend is not currently open and needs to be started,
          *  unless the JVM is DOWN or in a state where it is not needed. */
         if ((!forceOpen) &&
             ((wrapperData->jState == WRAPPER_JSTATE_DOWN_CLEAN) ||
@@ -1273,22 +1922,52 @@ int wrapperCheckServerSocket(int forceOpen) {
              (wrapperData->jState == WRAPPER_JSTATE_STOPPED) ||
              (wrapperData->jState == WRAPPER_JSTATE_KILLING) ||
              (wrapperData->jState == WRAPPER_JSTATE_KILL) ||
-             (wrapperData->jState == WRAPPER_JSTATE_DOWN_CHECK))) {
-            /* The JVM is down or in a state where the socket is not needed. */
+             (wrapperData->jState == WRAPPER_JSTATE_KILLED) ||
+             (wrapperData->jState == WRAPPER_JSTATE_DOWN_CHECK) ||
+             (wrapperData->jState == WRAPPER_JSTATE_DOWN_FLUSH))) {
+            /* The JVM is down or in a state where the backend is not needed. */
             return FALSE;
         } else {
-            /* The socket should be open, try doing so. */
+            /* The backend should be open, try doing so. */
             protocolStartServer();
-            if (protocolActiveServerSD == INVALID_SOCKET) {
+            if (((wrapperData->backendType == WRAPPER_BACKEND_TYPE_SOCKET) && (protocolActiveServerSD == INVALID_SOCKET)) ||
+                ((wrapperData->backendType == WRAPPER_BACKEND_TYPE_PIPE) && (protocolActiveServerPipeStarted == FALSE))) {
                 /* Failed. */
                 return FALSE;
+
             } else {
                 return TRUE;
             }
         }
     } else {
-        /* Socket is ready. */
+        /* Backend is ready. */
         return TRUE;
+    }
+}
+
+/**
+ * Simple function to parse hexidecimal numbers into a TICKS
+ */
+TICKS hexToTICKS(TCHAR *buffer) {
+    TICKS value = 0;
+    TCHAR c;
+    int pos = 0;
+    
+    while (TRUE) {
+        c = buffer[pos];
+        
+        if ((c >= TEXT('a')) && (c <= TEXT('f'))) {
+            value = (value << 4) + (10 + c - TEXT('a'));
+        } else if ((c >= TEXT('A')) && (c <= TEXT('F'))) {
+            value = (value << 4) + (10 + c - TEXT('A'));
+        } else if ((c >= TEXT('0')) && (c <= TEXT('9'))) {
+            value = (value << 4) + (c - TEXT('0'));
+        } else {
+            /* Any other character or null is the end of the number. */
+            return value;
+        }
+        
+        pos++;
     }
 }
 
@@ -1303,7 +1982,11 @@ int wrapperProtocolRead() {
     char c;
     char code;
     int len;
+#ifdef WIN32
+    int maxlen;
+#endif
     int pos;
+    TCHAR *tc;
     int err;
     struct timeb timeBuffer;
     time_t startTime;
@@ -1319,79 +2002,152 @@ int wrapperProtocolRead() {
     /*
     log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_DEBUG, TEXT("now=%ld, nowMillis=%d"), now, nowMillis);
     */
-
     while((durr = (now - startTime) * 1000 + (nowMillis - startTimeMillis)) < 250) {
         /*
         log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_DEBUG, TEXT("durr=%ld"), durr);
         */
 
-        /* If we have an open client socket, then use it. */
-        if (protocolActiveBackendSD == INVALID_SOCKET) {
-            /* A Client socket is not open */
-
-            /* Is the server socket open? */
-            if (!wrapperCheckServerSocket(FALSE)) {
-                /* Socket is down.  We can not read any packets. */
+        /* If we have an open client backend, then use it. */
+        if (((wrapperData->backendType == WRAPPER_BACKEND_TYPE_SOCKET) && (protocolActiveBackendSD == INVALID_SOCKET)) ||
+            ((wrapperData->backendType == WRAPPER_BACKEND_TYPE_PIPE) && (protocolActiveServerPipeConnected == FALSE))) {
+            /* A Client backend is not open */
+            /* Is the server backend open? */
+            if (!wrapperCheckServerBackend(FALSE)) {
+                /* Backend is down.  We can not read any packets. */
                 return 0;
             }
-
-            /* Try accepting a socket */
+            /* Try accepting a connection */
             protocolOpen();
-            if (protocolActiveBackendSD == INVALID_SOCKET) {
+            if (((wrapperData->backendType == WRAPPER_BACKEND_TYPE_SOCKET) && (protocolActiveBackendSD == INVALID_SOCKET)) ||
+                ((wrapperData->backendType == WRAPPER_BACKEND_TYPE_PIPE) && (protocolActiveServerPipeConnected == FALSE))) {
                 return 0;
             }
         }
 
-        /* Try receiving a packet code */
-        len = recv(protocolActiveBackendSD, (void*) &c, 1, 0);
-        if (len == SOCKET_ERROR) {
-            err = wrapperGetLastError();
-            if ((err != EWOULDBLOCK) && (err != EAGAIN)
-                && (err != ENOTSOCK) && (err != ECONNRESET)) {
+        if (wrapperData->backendType == WRAPPER_BACKEND_TYPE_SOCKET) {
+            /* Try receiving a packet code */
+            len = recv(protocolActiveBackendSD, (void*) &c, 1, 0);
+            if (len == SOCKET_ERROR) {
+                err = wrapperGetLastError();
+                if ((err != EWOULDBLOCK) &&  /* Windows - Would block. */
+                    (err != EAGAIN)) {       /* UNIX - Would block. */
+                    if (wrapperData->isDebugging) {
+                        log_printf(WRAPPER_SOURCE_PROTOCOL, LEVEL_DEBUG, TEXT("socket read failed. (%s)"), getLastErrorText());
+                    }
+                    wrapperProtocolClose();
+                }
+                return 0;
+            } else if (len != 1) {
                 if (wrapperData->isDebugging) {
-                    log_printf(WRAPPER_SOURCE_PROTOCOL, LEVEL_DEBUG,
-                        TEXT("socket read failed. (%s)"), getLastErrorText());
+                    log_printf(WRAPPER_SOURCE_PROTOCOL, LEVEL_DEBUG, TEXT("socket read no code (closed?)."));
                 }
                 wrapperProtocolClose();
+                return 0;
             }
-            /*
-            log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_DEBUG, TEXT("no data"));
-            */
-            return 0;
-        } else if (len != 1) {
-            if (wrapperData->isDebugging) {
-                log_printf(WRAPPER_SOURCE_PROTOCOL, LEVEL_DEBUG, TEXT("socket read no code (closed?)."));
+            code = (char)c;
+
+            /* Read in any message */
+            pos = 0;
+            do {
+                len = recv(protocolActiveBackendSD, (void*) &c, 1, 0);
+                if (len == 1) {
+                    if (c == 0) {
+                        /* End of string */
+                        len = 0;
+                    } else if (pos < MAX_LOG_SIZE) {
+                        packetBuffer[pos] = c;
+                        pos++;
+                    }
+                } else {
+                    len = 0;
+                }
+            } while (len == 1);
+            /* terminate the string; */
+            packetBuffer[pos] = TEXT('\0');
+        } else if (wrapperData->backendType == WRAPPER_BACKEND_TYPE_PIPE) {
+#ifdef WIN32
+            err = PeekNamedPipe(protocolActiveServerPipeIn, NULL, 0, NULL, &maxlen, NULL);
+            if ((err == 0) && (GetLastError() == ERROR_BROKEN_PIPE)) {
+                /* ERROR_BROKEN_PIPE - the client has closed the pipe. So most likely it just exited */
+                protocolActiveServerPipeIn = INVALID_HANDLE_VALUE;
             }
-            wrapperProtocolClose();
+            if (maxlen == 0) {
+                /*no data available */
+                return 0;
+            }
+            if (ReadFile(protocolActiveServerPipeIn, &c, 1, &len, NULL) == TRUE || GetLastError() == ERROR_MORE_DATA) {
+                code = (char)c;
+                --maxlen;
+                pos = 0;
+                do {
+                    ReadFile(protocolActiveServerPipeIn, &c, 1, &len, NULL);
+                    if (len == 1) {
+                        if (c == 0) {
+                            /* End of string */
+                            len = 0;
+                        } else if (pos < MAX_LOG_SIZE) {
+                            packetBuffer[pos] = c;
+                            pos++;
+                        }
+                    } else {
+                        len = 0;
+                    }
+                } while (len == 1 && maxlen-- >= 0);
+                packetBuffer[pos] = TEXT('\0');
+            } else {
+                if (GetLastError() == ERROR_INVALID_HANDLE) {
+                    return 0;
+                } else {
+                    wrapperProtocolClose();
+                    return 0;
+                }
+            }            
+#else
+            len = read(protocolActiveServerPipeIn, (void*) &c, 1);
+            if (len == SOCKET_ERROR) {
+                err = wrapperGetLastError();
+                if ((err != EWOULDBLOCK) &&  /* Windows - Would block. */
+                    (err != EAGAIN)) {       /* UNIX - Would block. */
+                    if (wrapperData->isDebugging) {
+                        log_printf(WRAPPER_SOURCE_PROTOCOL, LEVEL_DEBUG, TEXT("pipe read failed. (%s)"), getLastErrorText());
+                    }
+                    wrapperProtocolClose();
+                }
+                return 0;
+            } else if (len == 0) {
+                /*nothing read...*/
+                return 0;
+            }
+            code = (char)c;
+
+            /* Read in any message */
+            pos = 0;
+            do {
+                len = read(protocolActiveServerPipeIn, (void*) &c, 1);
+                if (len == 1) {
+                    if (c == 0) {
+                        /* End of string */
+                        len = 0;
+                    } else if (pos < MAX_LOG_SIZE) {
+                        packetBuffer[pos] = c;
+                        pos++;
+                    }
+                } else {
+                    len = 0;
+                }
+            } while (len == 1);
+            /* terminate the string; */
+            packetBuffer[pos] = TEXT('\0');
+#endif
+        } else {
             return 0;
         }
 
-        code = (char)c;
-
-        /* Read in any message */
-        pos = 0;
-        do {
-
-            len = recv(protocolActiveBackendSD, (void*) &c, 1, 0);
-            if (len == 1) {
-                if (c == 0) {
-                    /* End of string */
-                    len = 0;
-                } else if (pos < MAX_LOG_SIZE) {
-                    packetBuffer[pos] = c;
-                    pos++;
-                }
-            } else {
-                len = 0;
-            }
-        } while (len == 1);
-        /* terminate the string; */
-        packetBuffer[pos] = TEXT('\0');
-
         if (wrapperData->isDebugging) {
-            if ( ( code == WRAPPER_MSG_PING ) && ( _tcscmp( packetBuffer, TEXT("silent") ) == 0 ) ) {
+            if ((code == WRAPPER_MSG_PING) && (_tcsstr(packetBuffer, TEXT("silent")) == packetBuffer)) {
                 /*
-                log_printf(WRAPPER_SOURCE_PROTOCOL, LEVEL_DEBUG, TEXT("read a silent ping packet"));
+                log_printf(WRAPPER_SOURCE_PROTOCOL, LEVEL_DEBUG, TEXT("read a silent ping packet %s : %s"),
+                    wrapperProtocolGetCodeName(code), packetBuffer);
                 */
             } else {
                 log_printf(WRAPPER_SOURCE_PROTOCOL, LEVEL_DEBUG, TEXT("read a packet %s : %s"),
@@ -1409,7 +2165,15 @@ int wrapperProtocolRead() {
             break;
 
         case WRAPPER_MSG_PING:
-            wrapperPingResponded();
+            /* Because all versions of the wrapper.jar simply bounce back the ping message, the pingSendTicks should always exist. */
+            tc = _tcschr(packetBuffer, TEXT(' '));
+            if (tc) {
+                /* A pingSendTicks should exist. Parse the id following the space. It will be in the format 0xffffffff. */
+                wrapperPingResponded(hexToTICKS(&tc[1]), TRUE);
+            } else {
+                /* Should not happen, but just in case use the current ticks. */
+                wrapperPingResponded(wrapperGetTicks(), FALSE);
+            }
             break;
 
         case WRAPPER_MSG_STOP_PENDING:
@@ -1442,9 +2206,7 @@ int wrapperProtocolRead() {
             break;
 
         case WRAPPER_MSG_APPEAR_ORPHAN:
-            log_printf(WRAPPER_SOURCE_PROTOCOL, LEVEL_STATUS, TEXT("Orphan the JVM and wait for it to exit on its own..."),
-                wrapperProtocolGetCodeName(code), packetBuffer);
-            wrapperData->isJVMOrphaned = TRUE;
+            /* No longer used.  This is still here in case a mix of versions are used. */
             break;
 
         default:
@@ -1475,6 +2237,10 @@ int wrapperProtocolRead() {
  *****************************************************************************/
 /**
  * IMPORTANT - Any logging done in here needs to be queued or it would cause a recursion problem.
+ *
+ * It is also critical that this is NEVER called from within the protocol function because it
+ *  would cause a deadlock with the protocol semaphore.  This means that it can never be called
+ *  from within log_printf(...).
  */
 void wrapperLogFileChanged(const TCHAR *logFile) {
     if (wrapperData->isDebugging) {
@@ -1493,7 +2259,12 @@ void wrapperLogFileChanged(const TCHAR *logFile) {
  */
 int wrapperInitialize() {
     TCHAR *retLocale;
-    
+#ifdef WIN32
+    int maxPathLen = _MAX_PATH;
+#else
+    int maxPathLen = PATH_MAX;
+#endif
+
     /* Initialize the properties variable. */
     properties = NULL;
 
@@ -1523,25 +2294,43 @@ int wrapperInitialize() {
     wrapperData->jvmRestarts = 0;
     wrapperData->jvmLaunchTicks = wrapperGetTicks();
     wrapperData->failedInvocationCount = 0;
-
+    wrapperData->originalWorkingDir = NULL;
+    wrapperData->configFile = NULL;
+    wrapperData->workingDir = NULL;
+    wrapperData->outputFilterCount = 0;
+    wrapperData->confDir = NULL;
+    wrapperData->umask = -1;
+    wrapperData->language = NULL;
+    wrapperData->portAddress = NULL;
+    wrapperData->pingTimedOut = FALSE;
 #ifdef WIN32
     if (!(tickMutexHandle = CreateMutex(NULL, FALSE, NULL))) {
         printf("Failed to create tick mutex. %s\n", getLastErrorText());
         return 1;
     }
+
+    /* Initialize control code queue. */
+    wrapperData->ctrlCodeQueue = malloc(sizeof(int) * CTRL_CODE_QUEUE_SIZE);
+    if (!wrapperData->ctrlCodeQueue) {
+        outOfMemory(TEXT("WI"), 2);
+        return 1;
+    }
+    wrapperData->ctrlCodeQueueWriteIndex = 0;
+    wrapperData->ctrlCodeQueueReadIndex = 0;
+    wrapperData->ctrlCodeQueueWrapped = FALSE;
 #endif
-    
+
     if (initLogging(wrapperLogFileChanged)) {
         return 1;
     }
-    
+
     /* This will only be called by the main thread on startup.
      * Immediately register this thread with the logger.
      * This has to happen after the logging is initialized. */
     logRegisterThread(WRAPPER_THREAD_MAIN);
-    
 
-    setLogfilePath(TEXT("wrapper.log"));
+
+    setLogfilePath(TEXT("wrapper.log"), NULL, FALSE);
     setLogfileRollMode(ROLL_MODE_SIZE);
     setLogfileFormat(TEXT("LPTM"));
     setLogfileLevelInt(LEVEL_DEBUG);
@@ -1550,6 +2339,24 @@ int wrapperInitialize() {
     setConsoleLogLevelInt(LEVEL_DEBUG);
     setConsoleFlush(TRUE);  /* Always flush immediately until the logfile is configured to make sure that problems are in a consistent location. */
     setSyslogLevelInt(LEVEL_NONE);
+
+#ifdef _DEBUG
+    log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS, TEXT("Wrapper Initializing...  Minimum logging configured."));
+#endif
+
+    /** Remember what the initial user directory was when the Wrapper was launched. */
+    wrapperData->initialPath = (TCHAR *)malloc((maxPathLen + 1) * sizeof(TCHAR));
+    if (!wrapperData->initialPath) {
+        outOfMemory(TEXT("WI"), 3);
+        return 1;
+    } else {
+        if (!(wrapperData->initialPath = _tgetcwd((TCHAR*)wrapperData->initialPath, maxPathLen + 1))) {
+            log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_FATAL, TEXT("Failed to get the initial directory. (%s)"), getLastErrorText());
+            return 1;
+        }
+    }
+    /* Set a variable to the initial working directory. */
+    setEnv(TEXT("WRAPPER_INIT_DIR"), wrapperData->initialPath, ENV_SOURCE_WRAPPER);
 
 #ifdef WIN32
     if (!(protocolMutexHandle = CreateMutex(NULL, FALSE, NULL))) {
@@ -1565,7 +2372,7 @@ int wrapperInitialize() {
         fflush(NULL);
         return 1;
     }
-    
+
     /* Set the default locale here so any startup error messages will have a chance of working.
      *  We will go back and try to set the actual locale again later once it is configured. */
     retLocale = _tsetlocale(LC_ALL, TEXT(""));
@@ -1583,16 +2390,195 @@ int wrapperInitialize() {
         log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS, TEXT("tsetlocale() returned NULL"));
 #endif
     }
-    
+
     if (loadEnvironment()) {
         return 1;
     }
-    
+
+#ifdef _DEBUG
+    log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS, TEXT("Wrapper Initialization complete."));
+#endif
     return 0;
 }
 
+void wrapperDataDispose() {
+    int i;
+
+    if (wrapperData->workingDir) {
+        free(wrapperData->workingDir);
+        wrapperData->workingDir = NULL;
+    }
+    if (wrapperData->originalWorkingDir) {
+        free(wrapperData->originalWorkingDir);
+        wrapperData->originalWorkingDir = NULL;
+    }
+    if (wrapperData->configFile) {
+        free(wrapperData->configFile);
+        wrapperData->configFile = NULL;
+    }
+    if (wrapperData->initialPath) {
+        free(wrapperData->initialPath);
+        wrapperData->initialPath = NULL;
+    }
+    if (wrapperData->classpath) {
+        free(wrapperData->classpath);
+        wrapperData->classpath = NULL;
+    }
+    if (wrapperData->portAddress) {
+        free(wrapperData->portAddress);
+        wrapperData->portAddress = NULL;
+    }
+#ifdef WIN32
+    if (wrapperData->jvmCommand) {
+        free(wrapperData->jvmCommand);
+        wrapperData->jvmCommand = NULL;
+    }
+    if (wrapperData->userName) {
+        free(wrapperData->userName);
+        wrapperData->userName = NULL;
+    }
+    if (wrapperData->domainName) {
+        free(wrapperData->domainName);
+        wrapperData->domainName = NULL;
+    }
+    if (wrapperData->ntServiceLoadOrderGroup) {
+        free(wrapperData->ntServiceLoadOrderGroup);
+        wrapperData->ntServiceLoadOrderGroup = NULL;
+    }
+    if (wrapperData->ntServiceDependencies) {
+        free(wrapperData->ntServiceDependencies);
+        wrapperData->ntServiceDependencies = NULL;
+    }
+    if (wrapperData->ntServiceAccount) {
+        free(wrapperData->ntServiceAccount);
+        wrapperData->ntServiceAccount = NULL;
+    }
+    if (wrapperData->ntServicePassword) {
+        free(wrapperData->ntServicePassword);
+        wrapperData->ntServicePassword = NULL;
+    }
+    if (wrapperData->ctrlCodeQueue) {
+        free(wrapperData->ctrlCodeQueue);
+        wrapperData->ctrlCodeQueue = NULL;
+    }
+#else
+    if(wrapperData->jvmCommand) {
+        for (i = 0; wrapperData->jvmCommand[i] != NULL; i++) {
+            free(wrapperData->jvmCommand[i]);
+            wrapperData->jvmCommand[i] = NULL;
+        }
+        free(wrapperData->jvmCommand);
+        wrapperData->jvmCommand = NULL;
+    }
+#endif
+    if (wrapperData->outputFilterCount > 0) {
+        for (i = 0; i < wrapperData->outputFilterCount; i++) {
+            if (wrapperData->outputFilters[i]) {
+                free(wrapperData->outputFilters[i]);
+                wrapperData->outputFilters[i] = NULL;
+            }
+            if (wrapperData->outputFilterActionLists[i]) {
+                free(wrapperData->outputFilterActionLists[i]);
+                wrapperData->outputFilterActionLists[i] = NULL;
+            }
+        }
+        if (wrapperData->outputFilters) {
+            free(wrapperData->outputFilters);
+            wrapperData->outputFilters = NULL;
+        }
+        if (wrapperData->outputFilterActionLists) {
+            free(wrapperData->outputFilterActionLists);
+            wrapperData->outputFilterActionLists = NULL;
+        }
+        if (wrapperData->outputFilterMessages) {
+            free(wrapperData->outputFilterMessages);
+            wrapperData->outputFilterMessages = NULL;
+        }
+        if (wrapperData->outputFilterAllowWildFlags) {
+            free(wrapperData->outputFilterAllowWildFlags);
+            wrapperData->outputFilterAllowWildFlags = NULL;
+        }
+        if (wrapperData->outputFilterMinLens) {
+            free(wrapperData->outputFilterMinLens);
+            wrapperData->outputFilterMinLens = NULL;
+        }
+    }
+
+    if (wrapperData->pidFilename) {
+        free(wrapperData->pidFilename);
+        wrapperData->pidFilename = NULL;
+    }
+    if (wrapperData->lockFilename) {
+        free(wrapperData->lockFilename);
+        wrapperData->lockFilename = NULL;
+    }
+    if (wrapperData->javaPidFilename) {
+        free(wrapperData->javaPidFilename);
+        wrapperData->javaPidFilename = NULL;
+    }
+    if (wrapperData->javaIdFilename) {
+        free(wrapperData->javaIdFilename);
+        wrapperData->javaIdFilename = NULL;
+    }
+    if (wrapperData->statusFilename) {
+        free(wrapperData->statusFilename);
+        wrapperData->statusFilename = NULL;
+    }
+    if (wrapperData->javaStatusFilename) {
+        free(wrapperData->javaStatusFilename);
+        wrapperData->javaStatusFilename = NULL;
+    }
+    if (wrapperData->commandFilename) {
+        free(wrapperData->commandFilename);
+        wrapperData->commandFilename = NULL;
+    }
+    if (wrapperData->consoleTitle) {
+        free(wrapperData->consoleTitle);
+        wrapperData->consoleTitle = NULL;
+    }
+    if (wrapperData->serviceName) {
+        free(wrapperData->serviceName);
+        wrapperData->serviceName = NULL;
+    }
+    if (wrapperData->serviceDisplayName) {
+        free(wrapperData->serviceDisplayName);
+        wrapperData->serviceDisplayName = NULL;
+    }
+    if (wrapperData->serviceDescription) {
+        free(wrapperData->serviceDescription);
+        wrapperData->serviceDescription = NULL;
+    }
+    if (wrapperData->hostName) {
+        free(wrapperData->hostName);
+        wrapperData->hostName = NULL;
+    }
+    if (wrapperData->confDir) {
+        free(wrapperData->confDir);
+        wrapperData->confDir = NULL;
+    }
+    if (wrapperData->argConfFileDefault && wrapperData->argConfFile) {
+        free(wrapperData->argConfFile);
+        wrapperData->argConfFile = NULL;
+    }
+
+    if (wrapperData) {
+        free(wrapperData);
+        wrapperData = NULL;
+    }
+
+}
+
+
+
 /** Common wrapper cleanup code. */
 void wrapperDispose() {
+    /* Make sure not to dispose twice.  This should not happen, but check for safety. */
+    if (disposed) {
+       _tprintf(TEXT("wrapperDispose was called more than once."));
+       return;
+    }
+    disposed = TRUE;
+
 #ifdef WIN32
     if (protocolMutexHandle) {
         if (!CloseHandle(protocolMutexHandle)) {
@@ -1600,19 +2586,41 @@ void wrapperDispose() {
             fflush(NULL);
         }
     }
+    
+    /* Make sure that the startup thread has completed. */
+    disposeStartup();
 #endif
 
+    
+    /* Clean up the javaIO thread. This should be done before the timer thread. */
+    if (wrapperData->useJavaIOThread) {
+        disposeJavaIO();
+    }
+
     /* Clean up the timer thread. */
-    if (wrapperData->useSystemTime) {
+    if (!wrapperData->useSystemTime) {
         disposeTimer();
     }
-    
-    /* Clean up the logging system. */
-    disposeLogging();
-    
+
     /* Clean up the properties structure. */
     disposeProperties(properties);
     properties = NULL;
+
+    disposeEnvironment();
+    if (wrapperChildWorkBuffer) {
+        free(wrapperChildWorkBuffer);
+        wrapperChildWorkBuffer = NULL;
+    }
+    if (protocolSendBuffer) {
+        free(protocolSendBuffer);
+        protocolSendBuffer = NULL;
+    }
+
+    /* Clean up the logging system.  Should happen near last. */
+    disposeLogging();
+
+    /* clean up the main wrapper data structure. This must be done last.*/
+    wrapperDataDispose();
 }
 
 /**
@@ -1652,15 +2660,38 @@ void wrapperGetFileBase(const TCHAR *fileName, TCHAR *baseName) {
 }
 
 /**
+ * Returns a buffer containing a multi-line version banner.  It is the responsibility of the caller
+ *  to make sure it gets freed.
+ */
+TCHAR *generateVersionBanner() {
+    TCHAR *banner = TEXT("Java Service Wrapper %s Edition %s-bit %s\n  Copyright (C) 1999-%s Tanuki Software, Ltd. All Rights Reserved.\n    http://wrapper.tanukisoftware.com");
+    TCHAR *product = TEXT("Community");
+    TCHAR *copyright = TEXT("2013");
+    TCHAR *buffer;
+    size_t len;
+
+    len = _tcslen(banner) + _tcslen(product) + _tcslen(wrapperBits) + _tcslen(wrapperVersionRoot) + _tcslen(copyright) + 1;
+    buffer = malloc(sizeof(TCHAR) * len);
+    if (!buffer) {
+        outOfMemory(TEXT("GVB"), 1);
+        return NULL;
+    }
+
+    _sntprintf(buffer, len, banner, product, wrapperBits, wrapperVersionRoot, copyright);
+
+    return buffer;
+}
+
+/**
  * Output the version.
  */
 void wrapperVersionBanner() {
-    log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS,
-        TEXT("Java Service Wrapper %s Edition %s-bit %s"), TEXT("Community"), wrapperBits, wrapperVersionRoot);
-    log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS,
-        TEXT("  Copyright (C) 1999-%s Tanuki Software, Ltd. All Rights Reserved."), TEXT("2010") );
-    log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS,
-        TEXT("    http://wrapper.tanukisoftware.com"));
+    TCHAR *banner = generateVersionBanner();
+    if (!banner) {
+        return;
+    }
+    log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS, banner);
+    free(banner);
 }
 
 /**
@@ -1734,13 +2765,18 @@ int wrapperParseArguments(int argc, TCHAR **argv) {
     TCHAR *argConfFileBase;
     TCHAR *c;
     int delimiter, wrapperArgCount;
-
-    delimiter = 1;
     wrapperData->javaArgValueCount = 0;
-    if (argc > 1) {
+    delimiter = 1;
+
+    if (argc > 1
+        ) {
         for (delimiter = 0; delimiter < argc ; delimiter++) {
             if ( _tcscmp(argv[delimiter], TEXT("--")) == 0) {
+#if !defined(WIN32) && defined(UNICODE)
+                free(argv[delimiter]);
+#endif
                 argv[delimiter] = NULL;
+
                 wrapperData->javaArgValueCount = argc - delimiter - 1;
                 if (delimiter + 1 < argc) {
                     wrapperData->javaArgValues = &argv[delimiter + 1];
@@ -1749,10 +2785,13 @@ int wrapperParseArguments(int argc, TCHAR **argv) {
             }
         }
     }
-    
+
     wrapperArgCount = delimiter ;
     if (wrapperArgCount > 1) {
 
+        /* Store the name of the binary.*/
+        wrapperData->argBinary = argv[0];
+        
         if (argv[1][0] == TEXT('-')) {
             /* Syntax 1 or 3 */
 
@@ -1773,6 +2812,14 @@ int wrapperParseArguments(int argc, TCHAR **argv) {
             }
 
             if (wrapperArgCount > 2) {
+                if (_tcsncmp(wrapperData->argCommand, TEXT("-translate"), 5) == 0) {
+                    if (wrapperArgCount > 3) {
+                        wrapperData->argConfFile = argv[3];
+                        wrapperData->argCount = wrapperArgCount - 4;
+                        wrapperData->argValues = &argv[4];
+                    }
+                    return TRUE;
+                }
                 /* Syntax 1 */
                 /* A command and conf file were specified. */
                 wrapperData->argConfFile = argv[2];
@@ -1781,25 +2828,27 @@ int wrapperParseArguments(int argc, TCHAR **argv) {
             } else {
                 /* Syntax 3 */
                 /* Only a command was specified.  Assume a default config file name. */
-                argConfFileBase = malloc(sizeof(TCHAR) * (_tcslen(argv[0]) + 1));
-                if (!argConfFileBase) {
-                    outOfMemory(TEXT("WPA"), 1);
-                    return FALSE;
-                }
-                wrapperGetFileBase(argv[0], argConfFileBase);
+                    argConfFileBase = malloc(sizeof(TCHAR) * (_tcslen(argv[0]) + 1));
+                    if (!argConfFileBase) {
+                        outOfMemory(TEXT("WPA"), 1);
+                        return FALSE;
+                    }
+                    wrapperGetFileBase(argv[0], argConfFileBase);
 
-                /* The following malloc is only called once, but is never freed. */
-                wrapperData->argConfFile = malloc((_tcslen(argConfFileBase) + 5 + 1) * sizeof(TCHAR));
-                if (!wrapperData->argConfFile) {
-                    outOfMemory(TEXT("WPA"), 2);
+                    /* The following malloc is only called once, but is never freed. */
+                    wrapperData->argConfFile = malloc((_tcslen(argConfFileBase) + 5 + 1) * sizeof(TCHAR));
+                    if (!wrapperData->argConfFile) {
+                        outOfMemory(TEXT("WPA"), 2);
+                        free(argConfFileBase);
+                        return FALSE;
+                    }
+                    _sntprintf(wrapperData->argConfFile, _tcslen(argConfFileBase) + 5 + 1, TEXT("%s.conf"), argConfFileBase);
+
                     free(argConfFileBase);
-                    return FALSE;
-                }
-                _sntprintf(wrapperData->argConfFile, _tcslen(argConfFileBase) + 5 + 1, TEXT("%s.conf"), argConfFileBase);
+
                 wrapperData->argConfFileDefault = TRUE;
                 wrapperData->argCount = wrapperArgCount - 2;
                 wrapperData->argValues = &argv[2];
-                free(argConfFileBase);
             }
         } else {
             /* Syntax 2 */
@@ -1815,26 +2864,26 @@ int wrapperParseArguments(int argc, TCHAR **argv) {
         /* A config file was not specified.  Assume a default config file name. */
         wrapperData->argCommand = TEXT("c");
         wrapperData->argCommandArg = NULL;
+            argConfFileBase = malloc(sizeof(TCHAR) * (_tcslen(argv[0]) + 1));
+            if (!argConfFileBase) {
+                outOfMemory(TEXT("WPA"), 3);
+                return FALSE;
+            }
+            wrapperGetFileBase(argv[0], argConfFileBase);
 
-        argConfFileBase = malloc(sizeof(TCHAR) * (_tcslen(argv[0]) + 1));
-        if (!argConfFileBase) {
-            outOfMemory(TEXT("WPA"), 3);
-            return FALSE;
-        }
-        wrapperGetFileBase(argv[0], argConfFileBase);
+            /* The following malloc is only called once, but is never freed. */
+            wrapperData->argConfFile = malloc((_tcslen(argConfFileBase) + 5 + 1) * sizeof(TCHAR));
+            if (!wrapperData->argConfFile) {
+                outOfMemory(TEXT("WPA"), 4);
+                free(argConfFileBase);
+                return FALSE;
+            }
+            _sntprintf(wrapperData->argConfFile, _tcslen(argConfFileBase) + 5 + 1, TEXT("%s.conf"), argConfFileBase);
 
-        /* The following malloc is only called once, but is never freed. */
-        wrapperData->argConfFile = malloc((_tcslen(argConfFileBase) + 5 + 1) * sizeof(TCHAR));
-        if (!wrapperData->argConfFile) {
-            outOfMemory(TEXT("WPA"), 4);
             free(argConfFileBase);
-            return FALSE;
-        }
-        _sntprintf(wrapperData->argConfFile, _tcslen(argConfFileBase) + 5 + 1, TEXT("%s.conf"), argConfFileBase);
         wrapperData->argConfFileDefault = TRUE;
         wrapperData->argCount = wrapperArgCount - 1;
-        wrapperData->argValues = &argv[1];
-        free(argConfFileBase);
+            wrapperData->argValues = &argv[1];
     }
 
     return TRUE;
@@ -1847,12 +2896,12 @@ int wrapperParseArguments(int argc, TCHAR **argv) {
  *                   Negative values are standard actions, positive are user
  *                   custom events.
  * @param triggerMsg The reason the actions are being fired.
- * @param actionCode Tracks where the action originated.
+ * @param actionSourceCode Tracks where the action originated.
  * @param logForActionNone Flag stating whether or not a message should be logged
  *                         for the NONE action.
  * @param exitCode Error code to use in case the action results in a shutdown.
  */
-void wrapperProcessActionList(int *actionList, const TCHAR *triggerMsg, int actionCode, int logForActionNone, int exitCode) {
+void wrapperProcessActionList(int *actionList, const TCHAR *triggerMsg, int actionSourceCode, int logForActionNone, int exitCode) {
     int i;
     int action;
 
@@ -1867,7 +2916,7 @@ void wrapperProcessActionList(int *actionList, const TCHAR *triggerMsg, int acti
 
                 case ACTION_SHUTDOWN:
                     log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS, TEXT("%s  Shutting down."), triggerMsg);
-                    wrapperStopProcess(exitCode);
+                    wrapperStopProcess(exitCode, FALSE);
                     break;
 
                 case ACTION_DUMP:
@@ -1881,12 +2930,12 @@ void wrapperProcessActionList(int *actionList, const TCHAR *triggerMsg, int acti
 
                 case ACTION_PAUSE:
                     log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS, TEXT("%s  Pausing..."), triggerMsg);
-                    wrapperPauseProcess(actionCode);
+                    wrapperPauseProcess(actionSourceCode);
                     break;
 
                 case ACTION_RESUME:
                     log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS, TEXT("%s  Resuming..."), triggerMsg);
-                    wrapperResumeProcess(actionCode);
+                    wrapperResumeProcess(actionSourceCode);
                     break;
 
 #if defined(MACOSX)
@@ -1913,6 +2962,16 @@ void wrapperProcessActionList(int *actionList, const TCHAR *triggerMsg, int acti
                     /* Do nothing but masks later filters */
                     break;
 
+                case ACTION_SUCCESS:
+                    log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS, TEXT("%s  Application has signalled success, consider this application started successful..."), triggerMsg);
+                    wrapperData->failedInvocationCount = 0;
+                    break;
+
+                case ACTION_GC:
+                    log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS, TEXT("%s  Requesting GC..."), triggerMsg);
+                    wrapperRequestJVMGC(actionSourceCode);
+                    break;
+
                 default:
                     log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_WARN, TEXT("Unknown action type: %d"), action);
                     break;
@@ -1924,70 +2983,300 @@ void wrapperProcessActionList(int *actionList, const TCHAR *triggerMsg, int acti
 }
 
 /**
+ * Function that will recursively attempt to match two strings where the
+ *  pattern can contain '?' or '*' wildcard characters.  This function requires
+ *  that the pattern be matched from the beginning of the text.
+ *
+ * @param text Text to be searched.
+ * @param textLen Length of the text.
+ * @param pattern Pattern to search for.
+ * @param patternLen Length of the pattern.
+ * @param minTextLen Minimum number of characters that the text needs to possibly match the pattern.
+ *
+ * @return TRUE if found, FALSE otherwise.
+ *
+ * 1)     text=abcdefg  textLen=7  pattern=a*d*efg  patternLen=7  minTextLen=5
+ * 1.1)   text=bcdefg   textLen=6  pattern=d*efg    patternLen=5  minTextLen=4
+ * 1.2)   text=cdefg    textLen=5  pattern=d*efg    patternLen=5  minTextLen=4
+ * 1.3)   text=defg     textLen=4  pattern=d*efg    patternLen=5  minTextLen=4
+ * 1.3.1) text=efg      textLen=3  pattern=efg      patternLen=3  minTextLen=3
+ */
+int wildcardMatchInner(const TCHAR *text, size_t textLen, const TCHAR *pattern, size_t patternLen, size_t minTextLen) {
+    size_t textIndex;
+    size_t patternIndex;
+    TCHAR patternChar;
+    size_t textIndex2;
+    TCHAR textChar;
+
+    /*log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_INFO, TEXT("  wildcardMatchInner(\"%s\", %d, \"%s\", %d, %d)"), text, textLen, pattern, patternLen, minTextLen);*/
+
+    textIndex = 0;
+    patternIndex = 0;
+
+    while ((textIndex < textLen) && (patternIndex < patternLen)) {
+        patternChar = pattern[patternIndex];
+
+        if (patternChar == TEXT('*')) {
+            /* The pattern '*' can match 0 or more characters.  This requires a bit of recursion to work it out. */
+            textIndex2 = textIndex;
+            /* Loop over all possible starting locations.  We know how many characters are needed to match (minTextLen - patternIndex) so we can stop there. */
+            while (textIndex2 < textLen - (minTextLen - (patternIndex + 1))) {
+                if (wildcardMatchInner(&(text[textIndex2]), textLen - textIndex2, &(pattern[patternIndex + 1]), patternLen - (patternIndex + 1), minTextLen - patternIndex)) {
+                    /* Got a match in recursion. */
+                    /*log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_INFO, TEXT("  wildcardMatchInner(\"%s\", %d, \"%s\", %d, %d) -> HERE1 textIndex=%d, patternIndex=%d, textIndex2=%d TRUE"), text, textLen, pattern, patternLen, minTextLen, textIndex, patternIndex, textIndex2);*/
+                    return TRUE;
+                } else {
+                    /* Failed to match.  Try matching one more character against the '*'. */
+                    textIndex2++;
+                }
+            }
+            /* If we get here then all possible starting locations failed. */
+            /*log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_INFO, TEXT("  wildcardMatchInner(\"%s\", %d, \"%s\", %d, %d) -> HERE2 textIndex=%d, patternIndex=%d, textIndex2=%d FALSE"), text, textLen, pattern, patternLen, minTextLen, textIndex, patternIndex, textIndex2);*/
+            return FALSE;
+        } else if (patternChar == TEXT('?')) {
+            /* Match any character. */
+            patternIndex++;
+            textIndex++;
+        } else {
+            textChar = text[textIndex];
+            if (patternChar == textChar) {
+                /* Characters match. */
+                patternIndex++;
+                textIndex++;
+            } else {
+                /* Characters do not match.  We are done. */
+                /*log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_INFO, TEXT("  wildcardMatchInner(\"%s\", %d, \"%s\", %d, %d) -> HERE3 textIndex=%d, patternIndex=%d FALSE"), text, textLen, pattern, patternLen, minTextLen, textIndex, patternIndex);*/
+                return FALSE;
+            }
+        }
+    }
+
+    /* It is ok if there are text characters left over as we only need to match a substring, not the whole string. */
+
+    /* If there are any pattern chars left.  Make sure that they are all wildcards. */
+    while (patternIndex < patternLen) {
+        if (pattern[patternIndex] != TEXT('*')) {
+            /*log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_INFO, TEXT("  wildcardMatchInner(\"%s\", %d, \"%s\", %d, %d) -> HERE4 pattern[%d]=%c FALSE"), text, textLen, pattern, patternLen, minTextLen, patternIndex, pattern[patternIndex]);*/
+            return FALSE;
+        }
+        patternIndex++;
+    }
+
+    /*log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_INFO, TEXT("  wildcardMatchInner(\"%s\", %d, \"%s\", %d, %d) -> HERE5 textIndex=%d, patternIndex=%d TRUE"), text, textLen, pattern, patternLen, minTextLen, textIndex, patternIndex);*/
+    return TRUE;
+}
+    
+/**
+ * Test function to pause the current thread for the specified amount of time.
+ *  This is used to test how the rest of the Wrapper behaves when a particular
+ *  thread blocks for any reason.
+ *
+ * @param pauseTime Number of seconds to pause for.  -1 will pause indefinitely.
+ * @param threadName Name of the thread that will be logged prior to pausing.
+ */
+void wrapperPauseThread(int pauseTime, const TCHAR *threadName) {
+    int i;
+    
+    if (pauseTime > 0) {
+        log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_WARN, TEXT("Pausing the \"%s\" thread for %d seconds..."), threadName, pauseTime);
+        for (i = 0; i < pauseTime; i++) {
+            wrapperSleep(1000);
+        }
+        log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_WARN, TEXT("Resuming the \"%s\" thread..."), threadName);
+    } else if (pauseTime < 0) {
+        log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_WARN, TEXT("Pausing the \"%s\" thread indefinitely."), threadName);
+        while(TRUE) {
+            wrapperSleep(1000);
+        }
+    }
+}
+
+/**
+ * Function that will recursively attempt to match two strings where the
+ *  pattern can contain '?' or '*' wildcard characters.
+ *
+ * @param text Text to be searched.
+ * @param pattern Pattern to search for.
+ * @param patternLen Length of the pattern.
+ * @param minTextLen Minimum number of characters that the text needs to possibly match the pattern.
+ *
+ * @return TRUE if found, FALSE otherwise.
+ */
+int wrapperWildcardMatch(const TCHAR *text, const TCHAR *pattern, size_t minTextLen) {
+    size_t textLen;
+    size_t patternLen;
+    size_t textIndex;
+
+    /*log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_INFO, TEXT("wrapperWildcardMatch(\"%s\", \"%s\", %d)"), text, pattern, minTextLen);*/
+
+    textLen = _tcslen(text);
+    if (textLen < minTextLen) {
+        return FALSE;
+    }
+
+    patternLen = _tcslen(pattern);
+    /*log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_INFO, TEXT("  textLen=%d, patternLen=%d"), textLen, patternLen);*/
+
+    textIndex = 0;
+    while (textIndex <= textLen - minTextLen) {
+        if (wildcardMatchInner(&(text[textIndex]), textLen - textIndex, pattern, patternLen, minTextLen)) {
+            return TRUE;
+        }
+        textIndex++;
+    }
+
+    return FALSE;
+}
+
+/**
+ * Calculates the minimum text length which could be matched by the specified pattern.
+ *  Patterns can contain '*' or '?' wildcards.
+ *  '*' matches 0 or more characters.
+ *  '?' matches exactly one character.
+ *
+ * @param pattern Pattern to calculate.
+ *
+ * @return The minimum text length of the pattern.
+ */
+size_t wrapperGetMinimumTextLengthForPattern(const TCHAR *pattern) {
+    size_t patternLen;
+    size_t patternIndex;
+    size_t minLen;
+
+    /*log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_INFO, TEXT("wrapperGetMinimumTextLengthForPattern(%s)"), pattern);*/
+
+    patternLen = _tcslen(pattern);
+    minLen = 0;
+    for (patternIndex = 0; patternIndex < patternLen; patternIndex++) {
+        if (pattern[patternIndex] == TEXT('*')) {
+            /* Matches 0 or more characters, so don't increment the minLen */
+        } else {
+            minLen++;
+        }
+    }
+
+    /*log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_INFO, TEXT("wrapperGetMinimumTextLengthForPattern(%s) -> %d"), pattern, minLen);*/
+
+    return minLen;
+}
+
+void logApplyFilters(const TCHAR *log) {
+    int i;
+    const TCHAR *filter;
+    const TCHAR *filterMessage;
+    int matched;
+
+    /* Look for output filters in the output.  Only match the first. */
+    for (i = 0; i < wrapperData->outputFilterCount; i++) {
+        if (_tcslen(wrapperData->outputFilters[i]) > 0) {
+            /* The filter is defined. */
+            matched = FALSE;
+            filter = wrapperData->outputFilters[i];
+
+            if (wrapperData->outputFilterAllowWildFlags[i]) {
+                if (wrapperWildcardMatch(log, filter, wrapperData->outputFilterMinLens[i])) {
+                    matched = TRUE;
+                }
+            } else {
+                /* Do a simple check to see if the pattern is found exactly as is. */
+                if (_tcsstr(log, filter)) {
+                    /* Found an exact match for the pattern. */
+                    /* Any wildcards in the pattern can be matched exactly if they exist in the output.  This is by design. */
+                    matched = TRUE;
+                }
+            }
+
+            if (matched) {
+                filterMessage = wrapperData->outputFilterMessages[i];
+                if ((!filterMessage) || (_tcslen(filterMessage) <= 0)) {
+                    filterMessage = TEXT("Filter trigger matched.");
+                }
+                wrapperProcessActionList(wrapperData->outputFilterActionLists[i], filterMessage, WRAPPER_ACTION_SOURCE_CODE_FILTER, FALSE, 1);
+
+                /* break out of the loop */
+                break;
+            }
+        }
+    }
+}
+
+/**
  * Logs a single line of child output allowing any filtering
  *  to be done in a common location.
  */
 void logChildOutput(const char* log) {
-    int i;
-    const TCHAR *filterMessage;
     TCHAR* tlog;
 #ifdef UNICODE
     int size;
-#ifdef WIN32
-    size = MultiByteToWideChar(CP_OEMCP,0, log,-1 , NULL,0) + 1;
+
+ #ifdef WIN32
+    TCHAR buffer[16];
+    UINT cp;
+ #endif
+#endif
+
+#ifdef UNICODE
+ #ifdef WIN32
+    GetLocaleInfo(GetThreadLocale(), LOCALE_IDEFAULTANSICODEPAGE, buffer, sizeof(buffer));
+    cp = _ttoi(buffer);
+    size = MultiByteToWideChar(cp, 0, log, -1 , NULL, 0) + 1;
     tlog = (TCHAR*)malloc(size * sizeof(TCHAR));
-    if(!tlog) {
+    if (!tlog) {
         outOfMemory(TEXT("WLCO"), 1);
+        return;
     }
-    MultiByteToWideChar(CP_OEMCP,0, log,-1 , (TCHAR*)tlog, size);
-#else
+    MultiByteToWideChar(cp, 0, log, -1, (TCHAR*)tlog, size);
+ #else
     size = mbstowcs(NULL, log, 0) + 1;
     tlog = malloc(size * sizeof(TCHAR));
-    if(!tlog) {
-            outOfMemory(TEXT("WLCO"), 1);
+    if (!tlog) {
+        outOfMemory(TEXT("WLCO"), 1);
+        return;
     }
     mbstowcs(tlog, log, size);
-#endif
+ #endif
 #else
     tlog = (TCHAR*)log;
 #endif
-    log_printf(wrapperData->jvmRestarts, LEVEL_INFO, TEXT("%s"), tlog);
+    log_printf(wrapperData->jvmRestarts, LEVEL_INFO, tlog);
 
     /* Look for output filters in the output.  Only match the first. */
-    for (i = 0; i < wrapperData->outputFilterCount; i++) {
-        if ((_tcslen(wrapperData->outputFilters[i]) > 0) && (_tcsstr(tlog, wrapperData->outputFilters[i]))) {
-            /* Found. */
-            filterMessage = wrapperData->outputFilterMessages[i];
-            if ((!filterMessage) || (_tcslen(filterMessage) <= 0)) {
-                filterMessage = TEXT("Filter trigger matched.");
-            }
-            wrapperProcessActionList(wrapperData->outputFilterActionLists[i], filterMessage, WRAPPER_ACTION_SOURCE_CODE_FILTER, FALSE, 1);
+    logApplyFilters(tlog);
 
-            /* break out of the loop */
-            break;
-        }
-    }
 #ifdef UNICODE
     free(tlog);
 #endif
 }
 
-#define READ_BUFFER_BLOCK_SIZE 1024
-char *wrapperChildWorkBuffer = NULL;
-size_t wrapperChildWorkBufferSize = 0;
-size_t wrapperChildWorkBufferLen = 0;
+
+/**
+ * This function is for moving a buffer inside itself.
+ */
+void safeMemCpy(char *buffer, size_t target, size_t src, size_t nbyte) {
+    size_t i;
+    for (i = 0; i < nbyte; i++) {
+        buffer[target + i] = buffer[src + i];
+    }
+}
+
 #define CHAR_LF 0x0a
 
 /**
  * Read and process any output from the child JVM Process.
- * Most output should be logged to the wrapper log file.
  *
- * This function will only be allowed to run for 250ms before returning.  This is to
- *  make sure that the main loop gets CPU.  If there is more data in the pipe, then
- *  the function returns TRUE, otherwise FALSE.  This is a hint to the mail loop not to
- *  sleep.
+ * When maxTimeMS is non-zero this function will only be allowed to run for that maximum
+ *  amount of time.  This is done to make sure the calling function is allowed CPU for
+ *  other activities.   When timing out for this reason when there is more data in the
+ *  pipe, this function will return TRUE to let the calling code know that it should
+ *  not to any unnecessary sleeps.  Otherwise FALSE will be returned.
+ *
+ * @param maxTimeMS The maximum number of milliseconds that this function will be allowed
+ *                  to run without returning.  In reality no new reads will happen after
+ *                  this time, but actual processing may take longer.
+ *
+ * @return TRUE if the calling code should call this function again as soon as possible.
  */
-int wrapperReadChildOutput() {
+int wrapperReadChildOutput(int maxTimeMS) {
     struct timeb timeBuffer;
     time_t startTime;
     int startTimeMillis;
@@ -1997,6 +3286,7 @@ int wrapperReadChildOutput() {
     char *tempBuffer;
     char *cLF;
     int currentBlockRead;
+    size_t loggedOffset;
     int defer = FALSE;
     int readThisPass = FALSE;
 
@@ -2023,7 +3313,7 @@ int wrapperReadChildOutput() {
     /* Loop and read in CHILD_BLOCK_SIZE characters at a time.
      *
      * To keep a JVM outputting lots of content from freezing the Wrapper, we force a return every 250ms. */
-    while ((durr = (now - startTime) * 1000 + (nowMillis - startTimeMillis)) < 250) {
+    while ((maxTimeMS <= 0) || ((durr = (now - startTime) * 1000 + (nowMillis - startTimeMillis)) < maxTimeMS)) {
 #ifdef DEBUG_CHILD_OUTPUT
         log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_INFO, TEXT("durr=%ld"), durr);
 #endif
@@ -2033,7 +3323,13 @@ int wrapperReadChildOutput() {
 #ifdef DEBUG_CHILD_OUTPUT
             log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_INFO, TEXT("Expand buffer."));
 #endif
-            tempBuffer = malloc(wrapperChildWorkBufferSize + sizeof(char) * (READ_BUFFER_BLOCK_SIZE + 1));
+            /* Increase the buffer quickly, but try not to get too big.  Increase to a size that is the
+             *  greater of size + 1024 or size * 1.1.
+             * Also make sure the new buffer is larger than the buffer len.  This should not be necessary
+             *  but is safer. */
+            wrapperChildWorkBufferSize = __max(wrapperChildWorkBufferLen + 1, __max(wrapperChildWorkBufferSize + READ_BUFFER_BLOCK_SIZE, wrapperChildWorkBufferSize + wrapperChildWorkBufferSize / 10));
+            
+            tempBuffer = malloc(wrapperChildWorkBufferSize + 1);
             if (!tempBuffer) {
                 outOfMemory(TEXT("WRCO"), 2);
                 return FALSE;
@@ -2042,16 +3338,15 @@ int wrapperReadChildOutput() {
             tempBuffer[wrapperChildWorkBufferLen] = '\0';
             free(wrapperChildWorkBuffer);
             wrapperChildWorkBuffer = tempBuffer;
-            wrapperChildWorkBufferSize += READ_BUFFER_BLOCK_SIZE;
 #ifdef DEBUG_CHILD_OUTPUT
             log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_INFO, TEXT("buffer now %d bytes"), wrapperChildWorkBufferSize);
 #endif
         }
 
 #ifdef DEBUG_CHILD_OUTPUT
-        log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_INFO, TEXT("Read from pipe.  buffLen=%d, buffSize=%d"), wrapperChildWorkBufferLen, wrapperChildWorkBufferSize);
+        log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_INFO, TEXT("Try reading from pipe.  totalBuffLen=%d, buffSize=%d"), wrapperChildWorkBufferLen, wrapperChildWorkBufferSize);
 #endif
-        if (wrapperReadChildOutputBlock(wrapperChildWorkBuffer + (wrapperChildWorkBufferLen), READ_BUFFER_BLOCK_SIZE, &currentBlockRead)) {
+        if (wrapperReadChildOutputBlock(wrapperChildWorkBuffer + (wrapperChildWorkBufferLen), (int)(wrapperChildWorkBufferSize - wrapperChildWorkBufferLen), &currentBlockRead)) {
             /* Error already reported. */
             return FALSE;
         }
@@ -2059,21 +3354,32 @@ int wrapperReadChildOutput() {
         if (currentBlockRead > 0) {
             /* We read in a block, so increase the length. */
             wrapperChildWorkBufferLen += currentBlockRead;
+            wrapperChildWorkLastDataTime = now;
+            wrapperChildWorkLastDataTimeMillis = nowMillis;
             readThisPass = TRUE;
+#ifdef DEBUG_CHILD_OUTPUT
+            log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_INFO, TEXT("  Read %d bytes of new output.  totalBuffLen=%d, buffSize=%d"), currentBlockRead, wrapperChildWorkBufferLen, wrapperChildWorkBufferSize);
+#endif
         }
 
         /* Terminate the string just to avoid errors.  The buffer has an extra character to handle this. */
         wrapperChildWorkBuffer[wrapperChildWorkBufferLen] = '\0';
+        
+        /* Loop over the contents of the buffer and try and extract as many lines as possible.
+         *  Keep track of where we are to avoid unnecessary memory copies.
+         *  At this point, the entire buffer will always be unlogged. */
+        loggedOffset = 0;
         defer = FALSE;
-        while ((wrapperChildWorkBufferLen > 0) && (!defer)) {
+        while ((wrapperChildWorkBufferLen > loggedOffset) && (!defer)) {
 #ifdef DEBUG_CHILD_OUTPUT
-            log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_INFO, TEXT("Inner loop.  buffLen=%d, buffSize=%d"), wrapperChildWorkBufferLen, wrapperChildWorkBufferSize);
+            log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_INFO, TEXT("Inner loop.  totalBuffLen=%d, loggedOffset=%d, unloggedBuffLen=%d, buffSize=%d"), wrapperChildWorkBufferLen, loggedOffset, wrapperChildWorkBufferLen - loggedOffset, wrapperChildWorkBufferSize);
 #endif
             /* We have something in the buffer.  Loop and see if we have a complete line to log.
              * We will always find a LF at the end of the line.  On Windows there may be a CR immediately before it. */
-            cLF = strchr(wrapperChildWorkBuffer, (char)CHAR_LF);
+            cLF = strchr(wrapperChildWorkBuffer + loggedOffset, (char)CHAR_LF);
 
             if (cLF != NULL) {
+                /* We found a valid LF so we know that a full line is ready to be logged. */
 #ifdef WIN32
                 if ((cLF > wrapperChildWorkBuffer) && ((cLF - sizeof(char))[0] == 0x0d)) {
  #ifdef DEBUG_CHILD_OUTPUT
@@ -2096,64 +3402,105 @@ int wrapperReadChildOutput() {
 #ifdef DEBUG_CHILD_OUTPUT
  #ifdef UNICODE
                 /* It is not easy to log the string as is because they are not wide chars. Send it only to stdout. */
-                log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_INFO, TEXT("Log: (see stdout)"), wrapperChildWorkBuffer);
+                log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_INFO, TEXT("Log: (see stdout)"));
   #ifdef WIN32
-                wprintf(TEXT("Log: [%S]\n"), wrapperChildWorkBuffer);
+                wprintf(TEXT("Log: [%S]\n"), wrapperChildWorkBuffer + loggedOffset);
   #else
-                wprintf(TEXT("Log: [%s]\n"), wrapperChildWorkBuffer);
+                wprintf(TEXT("Log: [%s]\n"), wrapperChildWorkBuffer + loggedOffset);
   #endif
  #else
-                log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_INFO, TEXT("Log: [%s]"), wrapperChildWorkBuffer);
+                log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_INFO, TEXT("Log: [%s]"), wrapperChildWorkBuffer + loggedOffset);
  #endif
 #endif
-                logChildOutput(wrapperChildWorkBuffer);
-
-                /* Remove the line we just logged from the buffer by moving the rest up. */
-                /* NOTE - This line intentionally does the copy within the same memory space.  It is safe the way it is working however. */
-                strcpy(wrapperChildWorkBuffer, cLF + sizeof(char));
-                wrapperChildWorkBufferLen -= (cLF - wrapperChildWorkBuffer) + sizeof(char);
+                /* Actually log the individual line of output. */
+                logChildOutput(wrapperChildWorkBuffer + loggedOffset);
+                
+                /* Update the offset so we know how far we've logged. */
+                loggedOffset = cLF - wrapperChildWorkBuffer + 1;
+#ifdef DEBUG_CHILD_OUTPUT
+                log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_INFO, TEXT("loggedOffset: %d"), loggedOffset);
+#endif
             } else {
                 /* If we read this pass or if the last character is a CR on Windows then we always want to defer. */
                 if (readThisPass
 #ifdef WIN32
                         || (wrapperChildWorkBuffer[wrapperChildWorkBufferLen - 1] == 0x0d)
 #endif
+                        /* Avoid dumping partial lines because we call this funtion too quickly more than once.
+                         *  Never let the line be partial unless more than the LF-Delay threshold has expired. */
+                        || (wrapperData->logLFDelayThreshold == 0)
+                        || (((now - wrapperChildWorkLastDataTime) * 1000 + (nowMillis - wrapperChildWorkLastDataTimeMillis)) < wrapperData->logLFDelayThreshold)
                     ) {
 #ifdef DEBUG_CHILD_OUTPUT
  #ifdef UNICODE
                     /* It is not easy to log the string as is because they are not wide chars. Send it only to stdout. */
-                    log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_INFO, TEXT("Incomplete line.  Defer: (see stdout)"));
+                    log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_INFO, TEXT("Incomplete line.  Defer: (see stdout)  Age: %d"),
+                        (now - wrapperChildWorkLastDataTime) * 1000 + (nowMillis - wrapperChildWorkLastDataTimeMillis));
   #ifdef WIN32
-                    wprintf(TEXT("Defer Log: [%S]\n"), wrapperChildWorkBuffer);
+                    wprintf(TEXT("Defer Log: [%S]\n"), wrapperChildWorkBuffer + loggedOffset);
   #else
-                    wprintf(TEXT("Defer Log: [%s]\n"), wrapperChildWorkBuffer);
+                    wprintf(TEXT("Defer Log: [%s]\n"), wrapperChildWorkBuffer + loggedOffset);
   #endif
  #else
-                    log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_INFO, TEXT("Incomplete line.  Defer: [%s]"), wrapperChildWorkBuffer);
+                    log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_INFO, TEXT("Incomplete line.  Defer: [%s]  Age: %d"), wrapperChildWorkBuffer,
+                        (now - wrapperChildWorkLastDataTime) * 1000 + (nowMillis - wrapperChildWorkLastDataTimeMillis));
  #endif
 #endif
                     defer = TRUE;
                 } else {
-                    /* We have an incomplete line, but it was from a previous pass, so we want to log it as it may be a prompt.
+                    /* We have an incomplete line, but it was from a previous pass and is old enough, so we want to log it as it may be a prompt.
                      *  This will always be the complete buffer. */
 #ifdef DEBUG_CHILD_OUTPUT
  #ifdef UNICODE
                     /* It is not easy to log the string as is because they are not wide chars. Send it only to stdout. */
-                    log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_INFO, TEXT("Incomplete line, but log now: (see stdout)"));
+                    log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_INFO, TEXT("Incomplete line, but log now: (see stdout)  Age: %d"),
+                        (now - wrapperChildWorkLastDataTime) * 1000 + (nowMillis - wrapperChildWorkLastDataTimeMillis));
   #ifdef WIN32
-                    wprintf(TEXT("Log: [%S]\n"), wrapperChildWorkBuffer);
+                    wprintf(TEXT("Log: [%S]\n"), wrapperChildWorkBuffer + loggedOffset);
   #else
-                    wprintf(TEXT("Log: [%s]\n"), wrapperChildWorkBuffer);
+                    wprintf(TEXT("Log: [%s]\n"), wrapperChildWorkBuffer + loggedOffset);
   #endif
  #else
-                    log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_INFO, TEXT("Incomplete line, but log now: [%s]"), wrapperChildWorkBuffer);
+                    log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_INFO, TEXT("Incomplete line, but log now: [%s]  Age: %d"), wrapperChildWorkBuffer,
+                        (now - wrapperChildWorkLastDataTime) * 1000 + (nowMillis - wrapperChildWorkLastDataTimeMillis));
  #endif
 #endif
-                    logChildOutput(wrapperChildWorkBuffer);
+                    logChildOutput(wrapperChildWorkBuffer + loggedOffset);
+                    /* We know we read everything. */
+                    loggedOffset = wrapperChildWorkBufferLen;
+                    
+                    /* So we can safely reset the loggedOffset and clear the buffer. */
                     wrapperChildWorkBuffer[0] = '\0';
                     wrapperChildWorkBufferLen = 0;
+                    loggedOffset = 0;
                 }
             }
+        }
+        
+        /* We have read as many lines from the buffered output as possible.
+         *  If we still have any partial lines, then we need to make sure they are moved to the beginning of the buffer so we can read in another block. */
+        if (loggedOffset > 0) {
+            if (loggedOffset >= wrapperChildWorkBufferLen) {
+                /* We know we have read everything in.  So we can efficiently clear the buffer. */
+#ifdef DEBUG_CHILD_OUTPUT
+                log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_INFO, TEXT("Cleared Buffer as everything was logged."));
+#endif
+                wrapperChildWorkBuffer[0] = '\0';
+                wrapperChildWorkBufferLen = 0;
+                /* loggedOffset = 0; Not needed. */
+            } else {
+                /* We have logged one or more lines from the buffer, but unlogged content still exists.  It needs to be moved to the head of the buffer. */
+#ifdef DEBUG_CHILD_OUTPUT
+                log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_INFO, TEXT("Moving %d bytes in buffer for next cycle."), wrapperChildWorkBufferLen - loggedOffset);
+#endif
+                /* NOTE - This line intentionally does the copy within the same memory space.  It is safe the way it is working however. */
+                wrapperChildWorkBufferLen = wrapperChildWorkBufferLen - loggedOffset;
+                safeMemCpy(wrapperChildWorkBuffer, 0, loggedOffset, wrapperChildWorkBufferLen);
+                /* Shouldn't be needed, but just to make sure the buffer has been ended properly */
+                wrapperChildWorkBuffer[wrapperChildWorkBufferLen] = 0;
+                /* loggedOffset = 0; Not needed. */
+            }
+        } else {
         }
 
         if (currentBlockRead <= 0) {
@@ -2169,6 +3516,11 @@ int wrapperReadChildOutput() {
             }
             return FALSE;
         }
+        
+        /* Get the time again */
+        wrapperGetCurrentTime(&timeBuffer);
+        now = timeBuffer.time;
+        nowMillis = timeBuffer.millitm;
     }
 
     /* If we got here then we timed out. */
@@ -2183,7 +3535,13 @@ int wrapperReadChildOutput() {
  *  the log file name is sent to the JVM where it can be referenced by applications.
  */
 void sendLogFileName() {
-    wrapperProtocolFunction(WRAPPER_MSG_LOGFILE, getLogfilePath());
+    TCHAR *currentLogFilePath;
+
+    currentLogFilePath = getCurrentLogfilePath();
+
+    wrapperProtocolFunction(WRAPPER_MSG_LOGFILE, currentLogFilePath);
+
+    free(currentLogFilePath);
 }
 
 /**
@@ -2201,16 +3559,48 @@ void sendProperties() {
     }
 }
 
+/**
+ * Common cleanup code which should get called when we first decide that the JVM was down.
+ */
+void wrapperJVMDownCleanup(int setState) {
+    /* Only set the state to DOWN_CHECK if we are not already in a state which reflects this. */
+    if (setState) {
+        if (wrapperData->jvmCleanupTimeout > 0) {
+            wrapperSetJavaState(WRAPPER_JSTATE_DOWN_CHECK, wrapperGetTicks(), wrapperData->jvmCleanupTimeout);
+        } else {
+            wrapperSetJavaState(WRAPPER_JSTATE_DOWN_CHECK, wrapperGetTicks(), -1);
+        }
+    }
+
+    /* Remove java pid file if it was registered and created by this process. */
+    if (wrapperData->javaPidFilename) {
+        _tunlink(wrapperData->javaPidFilename);
+    }
+
+#ifdef WIN32
+    if (!CloseHandle(wrapperData->javaProcess)) {
+        log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_ERROR,
+            TEXT("Failed to close the Java process handle: %s"), getLastErrorText());
+    }
+    wrapperData->javaProcess = NULL;
+#endif
+
+    /* Close any open socket to the JVM */
+    if (wrapperData->stoppedPacketReceived) {
+        wrapperProtocolClose();
+    } else {
+        /* Leave the socket open so the Wrapper has the chance to read any outstanding packets. */
+    }
+}
 
 /**
  * Immediately kill the JVM process and set the JVM state to
  *  WRAPPER_JSTATE_DOWN_CHECK.
  */
-void wrapperKillProcessNow() {
+int wrapperKillProcessNow() {
 #ifdef WIN32
     int ret;
 #endif
-
     /* Check to make sure that the JVM process is still running */
 #ifdef WIN32
     ret = WaitForSingleObject(wrapperData->javaProcess, 0);
@@ -2228,51 +3618,24 @@ void wrapperKillProcessNow() {
          *  down.  Ideally, we would call ExitProcess, but that can only be
          *  called from within the process being killed. */
         if (TerminateProcess(wrapperData->javaProcess, 0)) {
+    
 #else
-        if (kill(wrapperData->javaPID, SIGKILL) == 0) {
+        if (kill(wrapperData->javaPID, SIGKILL) == 0) { 
 #endif
-            log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_ERROR, TEXT("JVM did not exit on request, terminated"));
+            log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_ERROR, TEXT("JVM did not exit on request, termination requested."));
+            return FALSE;
         } else {
             log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_ERROR, TEXT("JVM did not exit on request."));
             log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_ERROR,
                 TEXT("  Attempt to terminate process failed: %s"), getLastErrorText());
+            /* Terminating the current JVM failed. Cancel pending restart requests */
+            wrapperJVMDownCleanup(TRUE);
+            wrapperData->exitCode = 1;
+            return TRUE;
         }
-
-        /* Give the JVM a chance to be killed so that the state will be correct. */
-        wrapperSleep(FALSE, 500); /* 0.5 seconds */
-
-        /* Set the exit code since we were forced to kill the JVM. */
-        wrapperData->exitCode = 1;
     }
-
-    if (wrapperData->jvmCleanupTimeout > 0) {
-        wrapperSetJavaState(WRAPPER_JSTATE_DOWN_CHECK, wrapperGetTicks(), wrapperData->jvmCleanupTimeout);
-    } else {
-        wrapperSetJavaState(WRAPPER_JSTATE_DOWN_CHECK, wrapperGetTicks(), -1);
-    }
-
-    /* Remove java pid file if it was registered and created by this process. */
-    if (wrapperData->javaPidFilename) {
-#ifdef WIN32
-        _tunlink(wrapperData->javaPidFilename);
-#else
-        _tunlink(wrapperData->javaPidFilename);
-#endif
-    }
-
-#ifdef WIN32
-    if (!CloseHandle(wrapperData->javaProcess)) {
-        log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_ERROR,
-            TEXT("Failed to close the Java process handle: %s"), getLastErrorText());
-    }
-    wrapperData->javaProcess = NULL;
-    wrapperData->javaPID = 0;
-#else
-    wrapperData->javaPID = -1;
-#endif
-
-    /* Close any open socket to the JVM */
-    wrapperProtocolClose();
+    wrapperJVMDownCleanup(TRUE);
+    return FALSE;
 }
 
 /**
@@ -2289,7 +3652,8 @@ void wrapperKillProcess() {
 
     if ((wrapperData->jState == WRAPPER_JSTATE_DOWN_CLEAN) ||
         (wrapperData->jState == WRAPPER_JSTATE_LAUNCH_DELAY) ||
-        (wrapperData->jState == WRAPPER_JSTATE_DOWN_CHECK)) {
+        (wrapperData->jState == WRAPPER_JSTATE_DOWN_CHECK) ||
+        (wrapperData->jState == WRAPPER_JSTATE_DOWN_FLUSH)) {
         /* Already down. */
         if (wrapperData->jState == WRAPPER_JSTATE_LAUNCH_DELAY) {
             wrapperSetJavaState(WRAPPER_JSTATE_DOWN_CLEAN, wrapperGetTicks(), 0);
@@ -2308,7 +3672,7 @@ void wrapperKillProcess() {
         if (wrapperData->requestThreadDumpOnFailedJVMExit) {
             wrapperRequestDumpJVMState();
 
-            delay = 5;
+            delay = wrapperData->requestThreadDumpOnFailedJVMExitDelay;
         }
     }
 
@@ -2323,7 +3687,7 @@ void wrapperKillProcess() {
  */
 int checkForTestWrapperScripts() {
     const TCHAR* prop;
-    
+
     prop = getStringProperty(properties, TEXT("wrapper.java.mainclass"), NULL);
     if (prop) {
         if (_tcscmp(prop, TEXT("org.tanukisoftware.wrapper.test.Main")) == 0) {
@@ -2338,7 +3702,7 @@ int checkForTestWrapperScripts() {
                     log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_ERROR, TEXT(
                         "--------------------------------------------------------------------"));
                     log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_ERROR, TEXT(
-                        "We have detected that you are making use of the sample batch files\nthat are designed for the TestWrapper sample application.  When\nsetting up your own application, please copy fresh files over from\nthe Wrapper's src\\bin directory."));
+                        "We have detected that you are making use of the sample batch files\nthat are designed for the TestWrapper Example Application.  When\nsetting up your own application, please copy fresh files over from\nthe Wrapper's src\\bin directory."));
                     log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_ERROR, TEXT(
                         ""));
                     log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_ERROR, TEXT(
@@ -2358,7 +3722,7 @@ int checkForTestWrapperScripts() {
                     log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_ERROR, TEXT(
                         "--------------------------------------------------------------------"));
                     log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_ERROR, TEXT(
-                        "We have detected that you are making use of the sample shell scripts\nthat are designed for the TestWrapper sample application.  When\nsetting up your own application, please copy fresh files over from\nthe Wrapper's src/bin directory."));
+                        "We have detected that you are making use of the sample shell scripts\nthat are designed for the TestWrapper Example Application.  When\nsetting up your own application, please copy fresh files over from\nthe Wrapper's src/bin directory."));
                     log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_ERROR, TEXT(
                         ""));
                     log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_ERROR, TEXT(
@@ -2379,30 +3743,239 @@ int checkForTestWrapperScripts() {
     return FALSE;
 }
 
+#ifdef WIN32
+#define OSBUFSIZE 256
+
+/**
+ * Creates a human readable representation of the Windows OS the Wrapper is run on.
+ *
+ * @param pszOS the buffer the information gets stored to
+ * @return FALSE if error or no information could be retrieved. TRUE otherwise.
+ */
+BOOL GetOSDisplayString(TCHAR** pszOS) {
+    OSVERSIONINFOEX osvi;
+    SYSTEM_INFO si;
+    FARPROC pGNSI;
+    FARPROC pGPI;
+    DWORD dwType;
+    TCHAR buf[80];
+
+    ZeroMemory(&si, sizeof(SYSTEM_INFO));
+    ZeroMemory(&osvi, sizeof(OSVERSIONINFOEX));
+
+    osvi.dwOSVersionInfoSize = sizeof(OSVERSIONINFOEX);
+
+    if (!GetVersionEx((OSVERSIONINFO*) &osvi)) {
+         return FALSE;
+    }
+
+    /* Call GetNativeSystemInfo if supported or GetSystemInfo otherwise.*/
+
+    pGNSI = GetProcAddress(GetModuleHandle(TEXT("kernel32.dll")), "GetNativeSystemInfo");
+    if (NULL != pGNSI) {
+        pGNSI(&si);
+    } else {
+        GetSystemInfo(&si);
+    }
+
+    if ((VER_PLATFORM_WIN32_NT == osvi.dwPlatformId) && (osvi.dwMajorVersion > 4)) {
+        _tcsncpy(*pszOS, TEXT("Microsoft "), OSBUFSIZE);
+
+        /* Test for the specific product. */
+        if (osvi.dwMajorVersion == 6) {
+            if (osvi.dwMinorVersion == 0 ) {
+                if (osvi.wProductType == VER_NT_WORKSTATION) {
+                    _tcsncat(*pszOS, TEXT("Windows Vista "), OSBUFSIZE);
+                } else {
+                    _tcsncat(*pszOS, TEXT("Windows Server 2008 "), OSBUFSIZE);
+                }
+            }
+
+            if (osvi.dwMinorVersion == 1) {
+                if (osvi.wProductType == VER_NT_WORKSTATION) {
+                    _tcsncat(*pszOS, TEXT("Windows 7 "), OSBUFSIZE);
+                } else {
+                    _tcsncat(*pszOS, TEXT("Windows Server 2008 R2 "), OSBUFSIZE);
+                }
+            }
+
+            pGPI = GetProcAddress(GetModuleHandle(TEXT("kernel32.dll")), "GetProductInfo");
+
+            pGPI(osvi.dwMajorVersion, osvi.dwMinorVersion, 0, 0, &dwType);
+
+            switch (dwType) {
+                case 1:
+                    _tcsncat(*pszOS, TEXT("Ultimate Edition" ), OSBUFSIZE);
+                    break;
+                case 48:
+                    _tcsncat(*pszOS, TEXT("Professional"), OSBUFSIZE);
+                    break;
+                case 3:
+                    _tcsncat(*pszOS, TEXT("Home Premium Edition"), OSBUFSIZE);
+                    break;
+                case 67:
+                    _tcsncat(*pszOS, TEXT("Home Basic Edition"), OSBUFSIZE);
+                    break;
+                case 4:
+                    _tcsncat(*pszOS, TEXT("Enterprise Edition"), OSBUFSIZE);
+                    break;
+                case 6:
+                    _tcsncat(*pszOS, TEXT("Business Edition"), OSBUFSIZE);
+                    break;
+                case 11:
+                    _tcsncat(*pszOS, TEXT("Starter Edition"), OSBUFSIZE);
+                    break;
+                case 18:
+                    _tcsncat(*pszOS, TEXT("Cluster Server Edition"), OSBUFSIZE);
+                    break;
+                case 8:
+                    _tcsncat(*pszOS, TEXT("Datacenter Edition"), OSBUFSIZE);
+                    break;
+                case 12:
+                    _tcsncat(*pszOS, TEXT("Datacenter Edition (core installation)"), OSBUFSIZE);
+                    break;
+                case 10:
+                    _tcsncat(*pszOS, TEXT("Enterprise Edition"), OSBUFSIZE);
+                    break;
+                case 14:
+                    _tcsncat(*pszOS, TEXT("Enterprise Edition (core installation)"), OSBUFSIZE);
+                    break;
+                case 15:
+                    _tcsncat(*pszOS, TEXT("Enterprise Edition for Itanium-based Systems"), OSBUFSIZE);
+                    break;
+                case 9:
+                    _tcsncat(*pszOS,  TEXT("Small Business Server"), OSBUFSIZE);
+                    break;
+                case 25:
+                    _tcsncat(*pszOS, TEXT("Small Business Server Premium Edition"), OSBUFSIZE);
+                    break;
+                case 7:
+                    _tcsncat(*pszOS, TEXT("Standard Edition"), OSBUFSIZE);
+                    break;
+                case 13:
+                    _tcsncat(*pszOS, TEXT("Standard Edition (core installation)"), OSBUFSIZE);
+                    break;
+                case 17:
+                    _tcsncat(*pszOS, TEXT("Web Server Edition"), OSBUFSIZE);
+                    break;
+            }
+        }
+
+        if ((osvi.dwMajorVersion == 5) && (osvi.dwMinorVersion == 2)) {
+            if (GetSystemMetrics(89)) {
+                _tcsncat(*pszOS, TEXT("Windows Server 2003 R2, "), OSBUFSIZE);
+            } else if (osvi.wSuiteMask & 8192) {
+                _tcsncat(*pszOS, TEXT("Windows Storage Server 2003"), OSBUFSIZE);
+            } else if (osvi.wSuiteMask & 32768) {
+                _tcsncat(*pszOS, TEXT("Windows Home Server"), OSBUFSIZE);
+            } else if (osvi.wProductType == VER_NT_WORKSTATION && si.wProcessorArchitecture==PROCESSOR_ARCHITECTURE_AMD64) {
+                _tcsncat(*pszOS, TEXT("Windows XP Professional x64 Edition"), OSBUFSIZE);
+            } else {
+                _tcsncat(*pszOS, TEXT("Windows Server 2003, "), OSBUFSIZE);
+            }
+
+            /* Test for the server type. */
+            if (osvi.wProductType != VER_NT_WORKSTATION) {
+                if (si.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_IA64) {
+                    if (osvi.wSuiteMask & VER_SUITE_DATACENTER) {
+                        _tcsncat(*pszOS, TEXT("Datacenter Edition for Itanium-based Systems"), OSBUFSIZE);
+                    } else if (osvi.wSuiteMask & VER_SUITE_ENTERPRISE) {
+                        _tcsncat(*pszOS, TEXT("Enterprise Edition for Itanium-based Systems"), OSBUFSIZE);
+                    }
+                } else if (si.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_AMD64) {
+                    if (osvi.wSuiteMask & VER_SUITE_DATACENTER) {
+                        _tcsncat(*pszOS, TEXT("Datacenter x64 Edition"), OSBUFSIZE);
+                    } else if (osvi.wSuiteMask & VER_SUITE_ENTERPRISE) {
+                        _tcsncat(*pszOS, TEXT("Enterprise x64 Edition"), OSBUFSIZE);
+                    } else {
+                        _tcsncat(*pszOS, TEXT("Standard x64 Edition"), OSBUFSIZE);
+                    }
+                } else {
+                    if (osvi.wSuiteMask & VER_SUITE_COMPUTE_SERVER) {
+                        _tcsncat(*pszOS, TEXT("Compute Cluster Edition"), OSBUFSIZE);
+                    } else if (osvi.wSuiteMask & VER_SUITE_DATACENTER) {
+                        _tcsncat(*pszOS, TEXT("Datacenter Edition"), OSBUFSIZE);
+                    } else if (osvi.wSuiteMask & VER_SUITE_ENTERPRISE) {
+                        _tcsncat(*pszOS, TEXT("Enterprise Edition"), OSBUFSIZE);
+                    } else if (osvi.wSuiteMask & VER_SUITE_BLADE) {
+                        _tcsncat(*pszOS, TEXT("Web Edition" ), OSBUFSIZE);
+                    } else {
+                        _tcsncat(*pszOS, TEXT("Standard Edition"), OSBUFSIZE);
+                    }
+                }
+            }
+        }
+
+        if ((osvi.dwMajorVersion == 5) && (osvi.dwMinorVersion == 1)) {
+            _tcsncat(*pszOS, TEXT("Windows XP "), OSBUFSIZE);
+            if (osvi.wSuiteMask & VER_SUITE_PERSONAL) {
+                _tcsncat(*pszOS, TEXT("Home Edition"), OSBUFSIZE);
+            } else {
+                _tcsncat(*pszOS, TEXT("Professional"), OSBUFSIZE);
+            }
+        }
+
+        if ((osvi.dwMajorVersion == 5) && (osvi.dwMinorVersion == 0)) {
+            _tcsncat(*pszOS, TEXT("Windows 2000 "), OSBUFSIZE);
+            if (osvi.wProductType == VER_NT_WORKSTATION) {
+                _tcsncat(*pszOS, TEXT("Professional"), OSBUFSIZE);
+            } else {
+                if (osvi.wSuiteMask & VER_SUITE_DATACENTER) {
+                    _tcsncat(*pszOS, TEXT("Datacenter Server"), OSBUFSIZE);
+                } else if (osvi.wSuiteMask & VER_SUITE_ENTERPRISE) {
+                    _tcsncat(*pszOS, TEXT("Advanced Server"), OSBUFSIZE);
+                } else {
+                    _tcsncat(*pszOS, TEXT("Server"), OSBUFSIZE);
+                }
+            }
+        }
+
+        /* Include service pack (if any) and build number. */
+        if (_tcslen(osvi.szCSDVersion) > 0) {
+            _tcsncat(*pszOS, TEXT(" "), OSBUFSIZE);
+            _tcsncat(*pszOS, osvi.szCSDVersion, OSBUFSIZE);
+        }
+        _sntprintf(buf, 80, TEXT(" (build %d)"), osvi.dwBuildNumber);
+        _tcsncat(*pszOS, buf, OSBUFSIZE);
+
+        if (osvi.dwMajorVersion >= 6) {
+            if (si.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_AMD64) {
+                _tcsncat(*pszOS, TEXT(", 64-bit"), OSBUFSIZE);
+            } else if (si.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_INTEL) {
+                _tcsncat(*pszOS, TEXT(", 32-bit"), OSBUFSIZE);
+            }
+        }
+        return TRUE;
+    } else {
+        log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_DEBUG, TEXT("Unknown Windows Version"));
+        return FALSE;
+    }
+}
+#endif
+
 /**
  * Launch common setup code.
  */
-int wrapperRunCommon() {
+int wrapperRunCommonInner() {
     const TCHAR *prop;
+#ifdef WIN32
+    TCHAR* szOS;
+#endif
     struct tm timeTM;
     TCHAR* tz1;
     TCHAR* tz2;
 #if defined(UNICODE)
     size_t req;
 #endif
-    
-    /* Log a startup banner. */
-    wrapperVersionBanner();
 
     /* Make sure the tick timer is working correctly. */
     if (wrapperTickAssertions()) {
         return 1;
     }
-    
-    if (checkForTestWrapperScripts()) {
-        return 1;
-    }
-    
+
+    /* Log a startup banner. */
+    wrapperVersionBanner();
+
     /* The following code will display a licensed to block if a license key is found
      *  in the Wrapper configuration.  This piece of code is required as is for
      *  Development License owners to be in complience with their development license.
@@ -2418,6 +3991,16 @@ int wrapperRunCommon() {
     }
     log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS, TEXT(""));
 
+    if (checkForTestWrapperScripts()) {
+        return 1;
+    }
+
+#ifdef WIN32
+    if (initializeStartup()) {
+        return 1;
+    }
+#endif
+
     if (wrapperData->isDebugging) {
         timeTM = wrapperGetReleaseTime();
         log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_DEBUG, TEXT("Release time: %04d/%02d/%02d %02d:%02d:%02d"),
@@ -2432,12 +4015,11 @@ int wrapperRunCommon() {
         /* Display timezone information. */
         tzset();
 #if defined(UNICODE)
-#if !defined(WIN32)
+ #if !defined(WIN32)
         req = mbstowcs(NULL, tzname[0], 0) + 1;
         tz1 = malloc(req * sizeof(TCHAR));
         if (!tz1) {
             outOfMemory(TEXT("LHN"), 1);
-            req = -1;
         } else {
             mbstowcs(tz1, tzname[0], req);
             req = mbstowcs(NULL, tzname[1], 0) + 1;
@@ -2445,26 +4027,23 @@ int wrapperRunCommon() {
             if (!tz2) {
                 outOfMemory(TEXT("LHN"), 2);
                 free(tz1);
-                req = -1;
             } else {
                 mbstowcs(tz2, tzname[1], req);
-#else
+ #else
         req = MultiByteToWideChar(CP_OEMCP, 0, tzname[0], -1, NULL, 0);
         tz1 = malloc(req * sizeof(TCHAR));
         if (!tz1) {
             outOfMemory(TEXT("LHN"), 1);
-            req = -1;
         } else {
             MultiByteToWideChar(CP_OEMCP,0, tzname[0], -1, tz1, (int)req);
             req = MultiByteToWideChar(CP_OEMCP, 0, tzname[1], -1, NULL, 0);
             tz2 = malloc(req * sizeof(TCHAR));
             if (!tz2) {
-                req = -1;
                 free(tz1);
                 outOfMemory(TEXT("LHN"), 2);
             } else {
                 MultiByteToWideChar(CP_OEMCP,0, tzname[1], -1, tz2, (int)req);
-#endif
+ #endif
 
 #else
         tz1 = tzname[0];
@@ -2489,10 +4068,26 @@ int wrapperRunCommon() {
         }
 #endif
     }
-    
-    /* Should we dump the environment variables? */
-    if (getBooleanProperty(properties, TEXT("wrapper.environment.dump"), getBooleanProperty(properties, TEXT("wrapper.debug"), FALSE))) {
-        dumpEnvironment();
+
+#ifdef WIN32
+    if (wrapperData->isDebugging) {
+        log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_DEBUG, TEXT("Current User: %s  Domain: %s"), (wrapperData->userName ? wrapperData->userName : TEXT("N/A")), (wrapperData->domainName ? wrapperData->domainName : TEXT("N/A")));
+        szOS = calloc(OSBUFSIZE, sizeof(TCHAR));
+        if (szOS) {
+            if (GetOSDisplayString(&szOS)) {
+                log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_DEBUG, TEXT("Operating System ID: %s"), szOS);
+            }
+            free(szOS);
+        }
+    }
+#endif
+
+    /* Should we dump the environment variables?
+     * If the the user specifically wants the environment, show it as the status log level, otherwise include it in debug output if enabled. */
+    if (getBooleanProperty(properties, TEXT("wrapper.environment.dump"), FALSE)) {
+        dumpEnvironment(LEVEL_INFO);
+    } else if (getBooleanProperty(properties, TEXT("wrapper.debug"), FALSE)) {
+        dumpEnvironment(LEVEL_DEBUG);
     }
 
 #ifdef _DEBUG
@@ -2515,99 +4110,78 @@ int wrapperRunCommon() {
     return 0;
 }
 
-/**
- * Launch the wrapper as a console application.
- */
-int wrapperRunConsole() {
-    int res;
+int wrapperRunCommon(const TCHAR *runMode) {
+    int exitCode;
 
     /* Setup the wrapperData structure. */
     wrapperSetWrapperState(WRAPPER_WSTATE_STARTING);
     wrapperSetJavaState(WRAPPER_JSTATE_DOWN_CLEAN, 0, -1);
-    wrapperData->isConsole = TRUE;
+
+    log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS, TEXT("--> Wrapper Started as %s"), runMode);
 
     /* Initialize the wrapper */
-    res = wrapperInitializeRun();
-    if (res != 0) {
-        return res;
+    exitCode = wrapperInitializeRun();
+    if (exitCode == 0) {
+        if (!wrapperRunCommonInner()) {
+            /* Enter main event loop */
+            wrapperEventLoop();
+        
+            /* Clean up any open sockets. */
+            wrapperProtocolClose();
+            protocolStopServer();
+            
+            exitCode = wrapperData->exitCode;
+        } else {
+            exitCode = 1;
+        }
     }
 
-#ifdef WIN32
-    log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS, TEXT("--> Wrapper Started as Console"));
-#else
-    if (wrapperData->daemonize) {
-        log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS, TEXT("--> Wrapper Started as Daemon"));
-    } else {
-        log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS, TEXT("--> Wrapper Started as Console"));
-    }
-#endif
-    
-    if (wrapperRunCommon()) {
-        log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS, TEXT("<-- Wrapper Stopped"));
-        return 1;
-    }
-    
-    /* Enter main event loop */
-    wrapperEventLoop();
-
-    /* Clean up any open sockets. */
-    wrapperProtocolClose();
-    protocolStopServer();
     log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS, TEXT("<-- Wrapper Stopped"));
 
-    return wrapperData->exitCode;
+    return exitCode;
+}
+        
+/**
+ * Launch the wrapper as a console application.
+ */
+int wrapperRunConsole() {
+    return wrapperRunCommon(TEXT("Console"));
 }
 
 /**
  * Launch the wrapper as a service application.
  */
 int wrapperRunService() {
-    int res;
-
-    /* Setup the wrapperData structure. */
-    wrapperSetWrapperState(WRAPPER_WSTATE_STARTING);
-    wrapperSetJavaState(WRAPPER_JSTATE_DOWN_CLEAN, 0, -1);
-    wrapperData->isConsole = FALSE;
-
-    /* Initialize the wrapper */
-    res = wrapperInitializeRun();
-    if (res != 0) {
-        return res;
-    }
-
-    log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS, TEXT("--> Wrapper Started as Service"));
-    
-    if (wrapperRunCommon()) {
-        log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS, TEXT("<-- Wrapper Stopped"));
-        return 1;
-    }
-
-    /* Enter main event loop */
-    wrapperEventLoop();
-
-    /* Clean up any open sockets. */
-    wrapperProtocolClose();
-    protocolStopServer();
-    log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS, TEXT("<-- Wrapper Stopped"));
-
-    return wrapperData->exitCode;
+    return wrapperRunCommon(
+#ifdef WIN32
+        TEXT("Service")
+#else
+        TEXT("Daemon")
+#endif
+        );
 }
 
 /**
- * Used to ask the state engine to shut down the JVM and Wrapper
+ * Used to ask the state engine to shut down the JVM and Wrapper.
+ *
+ * @param exitCode Exit code to use when shutting down.
+ * @param force True to force the Wrapper to shutdown even if some configuration
+ *              had previously asked that the JVM be restarted.  This will reset
+ *              any existing restart requests, but it will still be possible for
+ *              later actions to request a restart.
  */
-void wrapperStopProcess(int exitCode) {
+void wrapperStopProcess(int exitCode, int force) {
     /* If we are are not aready shutting down, then do so. */
     if ((wrapperData->wState == WRAPPER_WSTATE_STOPPING) ||
         (wrapperData->wState == WRAPPER_WSTATE_STOPPED)) {
         if (wrapperData->isDebugging) {
             log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_DEBUG,
-                TEXT("wrapperStopProcess(%d) called while stopping.  (IGNORED)"), exitCode);
+                TEXT("wrapperStopProcess(%d, %s) called while stopping.  (IGNORED)"), exitCode, (force ? TEXT("TRUE") : TEXT("FALSE")));
         }
     } else {
         if (wrapperData->isDebugging) {
             log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_DEBUG,
-                TEXT("wrapperStopProcess(%d) called."), exitCode);
+                TEXT("wrapperStopProcess(%d, %s) called."), exitCode, (force ? TEXT("TRUE") : TEXT("FALSE")));
         }
         /* If it has not already been set, set the exit request flag. */
         if (wrapperData->exitRequested ||
@@ -2616,8 +4190,10 @@ void wrapperStopProcess(int exitCode) {
             (wrapperData->jState == WRAPPER_JSTATE_STOPPING) ||
             (wrapperData->jState == WRAPPER_JSTATE_STOPPED) ||
             (wrapperData->jState == WRAPPER_JSTATE_KILLING) ||
+            (wrapperData->jState == WRAPPER_JSTATE_KILLED) ||
             (wrapperData->jState == WRAPPER_JSTATE_KILL) ||
-            (wrapperData->jState == WRAPPER_JSTATE_DOWN_CHECK)) {
+            (wrapperData->jState == WRAPPER_JSTATE_DOWN_CHECK) ||
+            (wrapperData->jState == WRAPPER_JSTATE_DOWN_FLUSH)) {
             /* JVM is already down or going down. */
         } else {
             wrapperData->exitRequested = TRUE;
@@ -2625,12 +4201,32 @@ void wrapperStopProcess(int exitCode) {
 
         wrapperData->exitCode = exitCode;
 
-        /* Make sure that further restarts are disabled. */
-        wrapperData->restartRequested = WRAPPER_RESTART_REQUESTED_NO;
-        /* Do not call wrapperSetWrapperState(WRAPPER_WSTATE_STOPPING) here.
-         *  It will be called by the wrappereventloop.c.jStateDown once the
-         *  the JVM is completely down.  Calling it here will make it
-         *  impossible to trap and restart based on exit codes. */
+        if (force) {
+            /* Make sure that further restarts are disabled. */
+            wrapperData->restartRequested = WRAPPER_RESTART_REQUESTED_NO;
+
+            /* Do not call wrapperSetWrapperState(WRAPPER_WSTATE_STOPPING) here.
+             *  It will be called by the wrappereventloop.c.jStateDown once the
+             *  the JVM is completely down.  Calling it here will make it
+             *  impossible to trap and restart based on exit codes or other
+             *  Wrapper configurations. */
+
+            if (wrapperData->isDebugging) {
+                if ((wrapperData->restartRequested == WRAPPER_RESTART_REQUESTED_AUTOMATIC) || (wrapperData->restartRequested == WRAPPER_RESTART_REQUESTED_CONFIGURED)) {
+                    log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_DEBUG, TEXT("  Overriding request to restart JVM."));
+                }
+            }
+        } else {
+            /* Do not call wrapperSetWrapperState(WRAPPER_WSTATE_STOPPING) here.
+             *  It will be called by the wrappereventloop.c.jStateDown once the
+             *  the JVM is completely down.  Calling it here will make it
+             *  impossible to trap and restart based on exit codes. */
+            if (wrapperData->isDebugging) {
+                if ((wrapperData->restartRequested == WRAPPER_RESTART_REQUESTED_AUTOMATIC) || (wrapperData->restartRequested == WRAPPER_RESTART_REQUESTED_CONFIGURED)) {
+                    log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_DEBUG, TEXT("  Stop ignored.  Continuing to restart JVM."));
+                }
+            }
+        }
     }
 }
 
@@ -2647,6 +4243,7 @@ void wrapperRestartProcess() {
         (wrapperData->jState == WRAPPER_JSTATE_KILLING) ||
         (wrapperData->jState == WRAPPER_JSTATE_KILL) ||
         (wrapperData->jState == WRAPPER_JSTATE_DOWN_CHECK) ||
+        (wrapperData->jState == WRAPPER_JSTATE_DOWN_FLUSH) ||
         (wrapperData->jState == WRAPPER_JSTATE_LAUNCH_DELAY)) { /* Down but not yet restarted. */
 
         if (wrapperData->isDebugging) {
@@ -2667,9 +4264,9 @@ void wrapperRestartProcess() {
 /**
  * Used to ask the state engine to pause the JVM.
  *
- * @param actionCode Tracks where the action originated.
+ * @param actionSourceCode Tracks where the action originated.
  */
-void wrapperPauseProcess(int actionCode) {
+void wrapperPauseProcess(int actionSourceCode) {
     TCHAR msgBuffer[10];
 
     if (!wrapperData->pausable) {
@@ -2712,7 +4309,7 @@ void wrapperPauseProcess(int actionCode) {
 
         if (!wrapperData->pausableStopJVM) {
             /* Notify the Java process. */
-            _sntprintf(msgBuffer, 10, TEXT("%d"), actionCode);
+            _sntprintf(msgBuffer, 10, TEXT("%d"), actionSourceCode);
             wrapperProtocolFunction(WRAPPER_MSG_PAUSE, msgBuffer);
         }
     }
@@ -2721,9 +4318,9 @@ void wrapperPauseProcess(int actionCode) {
 /**
  * Used to ask the state engine to resume a paused the JVM.
  *
- * @param actionCode Tracks where the action originated.
+ * @param actionSourceCode Tracks where the action originated.
  */
-void wrapperResumeProcess(int actionCode) {
+void wrapperResumeProcess(int actionSourceCode) {
     TCHAR msgBuffer[10];
 
     if ((wrapperData->wState == WRAPPER_WSTATE_STOPPING) ||
@@ -2771,10 +4368,23 @@ void wrapperResumeProcess(int actionCode) {
 
         if (!wrapperData->pausableStopJVM) {
             /* Notify the Java process. */
-            _sntprintf(msgBuffer, 10, TEXT("%d"), actionCode);
+            _sntprintf(msgBuffer, 10, TEXT("%d"), actionSourceCode);
             wrapperProtocolFunction(WRAPPER_MSG_RESUME, msgBuffer);
         }
     }
+}
+
+/**
+ * Sends a command off to the JVM asking it to perform a garbage collection sweep.
+ *
+ * @param actionSourceCode Tracks where the action originated.
+ */
+void wrapperRequestJVMGC(int actionSourceCode) {
+    TCHAR msgBuffer[10];
+    
+    /* Notify the Java process. */
+    _sntprintf(msgBuffer, 10, TEXT("%d"), actionSourceCode);
+    wrapperProtocolFunction(WRAPPER_MSG_GC, msgBuffer);
 }
 
 /**
@@ -2787,11 +4397,11 @@ void wrapperResumeProcess(int actionCode) {
  * If two backslashes are found in a row, then the first escapes the
  *  second and the second is removed.
  */
-void wrapperStripQuotes(const TCHAR *prop, TCHAR *propStripped) {
+static size_t wrapperStripQuotesInner(const TCHAR *prop, size_t propLen, TCHAR *propStripped) {
     size_t len;
     int i, j;
 
-    len = _tcslen(prop);
+    len = propLen;
     j = 0;
     for (i = 0; i < (int)len; i++) {
         if ((prop[i] == TEXT('\\')) && (i < (int)len - 1)) {
@@ -2817,7 +4427,14 @@ void wrapperStripQuotes(const TCHAR *prop, TCHAR *propStripped) {
             j++;
         }
     }
-    propStripped[j] = TEXT('\0');
+    return j;
+}
+
+void wrapperStripQuotes(const TCHAR *prop, TCHAR *propStripped) {
+    size_t len;
+
+    len = wrapperStripQuotesInner(prop, _tcslen(prop), propStripped);
+    propStripped[len] = TEXT('\0');
 }
 
 /*
@@ -3002,7 +4619,7 @@ int checkIfBinary(const TCHAR *filename) {
             log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_DEBUG, TEXT("Magic number for file %s: 0x%02x%02x%02x%02x"), filename, head[0], head[1], head[2], head[3]);
         }
 
-#if defined(LINUX) || defined(FREEBSD) || defined(SOLARIS)
+#if defined(LINUX) || defined(FREEBSD) || defined(SOLARIS) 
         if (head[1] == 'E' && head[2] == 'L' && head[3] == 'F') {
             return 1; /*ELF */
 #elif defined(AIX)
@@ -3013,12 +4630,20 @@ int checkIfBinary(const TCHAR *filename) {
             return 1; /*xcoff 32*/
 #elif defined(MACOSX)
         if (head[0] == 0xca && head[1] == 0xfe && head[2] == 0xba && head[3] == 0xbe) { /* 0xcafebabe */
-            return 1; /*MACOS*/
+            return 1; /*MACOS Universal binary*/
+        } else if (head[0] == 0xcf && head[1] == 0xfa && head[2] == 0xed && head[3] == 0xfe) { /* 0xcffaedfe */
+            return 1; /*MACOS x86_64 binary*/
+        } else if (head[0] == 0xce && head[1] == 0xfa && head[2] == 0xed && head[3] == 0xfe) { /* 0xcefaedfe */
+            return 1; /*MACOS i386 binary*/
+        } else if (head[0] == 0xfe && head[1] == 0xed && head[2] == 0xfa && head[3] == 0xce) { /* 0xfeedface */
+            return 1; /*MACOS ppc, ppc64 binary*/
 #elif defined(HPUX)
         if (head[0] == 0x02 && head[1] == 0x10 && head[2] == 0x01 && head[3] == 0x08) { /* 0x02100108 PA-RISC 1.1 */
             return 1; /*HP UX PA RISC 32*/
         } else if (head[0] == 0x02 && head[1] == 0x14 && head[2] == 0x01 && head[3] == 0x07) { /* 0x02140107 PA-RISC 2.0 */
             return 1; /*HP UX PA RISC 32*/
+        } else if (head[1] == 'E' && head[2] == 'L' && head[3] == 'F') {
+            return 1; /*ELF */
 #elif defined(WIN32)
         if (head[0] == 'M' && head[1] == 'Z') {
             return 1; /* MS */
@@ -3034,61 +4659,64 @@ int checkIfBinary(const TCHAR *filename) {
 
 
 #ifndef WIN32
-TCHAR* findPathOf(const TCHAR *exe) {
+TCHAR* findPathOf(const TCHAR *exe, const TCHAR *name) {
     TCHAR *searchPath;
     TCHAR *beg, *end;
     int stop, found;
     TCHAR pth[PATH_MAX + 1];
     TCHAR *ret;
     TCHAR resolvedPath[PATH_MAX + 1];
-    
+
     if (exe[0] == TEXT('/')) {
         /* This is an absolute reference. */
         if (_trealpath(exe, resolvedPath)) {
-            _tcscpy(pth, resolvedPath);
+            _tcsncpy(pth, resolvedPath, PATH_MAX + 1);
             if (checkIfExecutable(pth)) {
-                ret = malloc((_tcslen(pth) + 1 ) * sizeof(TCHAR));
+                ret = malloc((_tcslen(pth) + 1) * sizeof(TCHAR));
                 if (!ret) {
                     outOfMemory(TEXT("FPO"), 1);
                     return NULL;
                 }
-                _tcscpy(ret, pth);
+                _tcsncpy(ret, pth, _tcslen(pth) + 1);
                 if (wrapperData->isDebugging) {
-                    log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_DEBUG, TEXT("Resolved the real path of wrapper.java.command as an absolute reference: %s"), ret);
+                    log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_DEBUG, TEXT("Resolved the real path of %s as an absolute reference: %s"), name, ret);
                 }
                 return ret;
             }
         } else {
             if (wrapperData->isDebugging) {
-                log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_DEBUG, TEXT("Unable to resolve the real path of wrapper.java.command as an absolute reference: %s (Problem at: %s)"), exe, resolvedPath);
+                log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_DEBUG, TEXT("Unable to resolve the real path of %s as an absolute reference: %s (Problem at: %s)"), name, exe, resolvedPath);
             }
         }
 
         return NULL;
     }
-    
+
     /* This is a non-absolute reference.  See if it is a relative reference. */
     if (_trealpath(exe, resolvedPath)) {
         /* Resolved.  See if the file exists. */
-        _tcscpy(pth, resolvedPath);
+        _tcsncpy(pth, resolvedPath, PATH_MAX + 1);
         if (checkIfExecutable(pth)) {
-            ret = malloc((_tcslen(pth) + 1 ) * sizeof(TCHAR));
+            ret = malloc((_tcslen(pth) + 1) * sizeof(TCHAR));
             if (!ret) {
                 outOfMemory(TEXT("FPO"), 2);
                 return NULL;
             }
-            _tcscpy(ret, pth);
+            _tcsncpy(ret, pth, _tcslen(pth) + 1);
             if (wrapperData->isDebugging) {
-                log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_DEBUG, TEXT("Resolved the real path of wrapper.java.command as a relative reference: %s"), ret);
+                log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_DEBUG, TEXT("Resolved the real path of %s as a relative reference: %s"), name, ret);
             }
             return ret;
         }
     } else {
         if (wrapperData->isDebugging) {
-            log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_DEBUG, TEXT("Unable to resolve the real path of wrapper.java.command as a relative reference: %s (Problem at: %s)"), exe, resolvedPath);
+            /* Some platforms (MACOSX) will return the point that was the problem, it seems to work
+             *  on some other platforms but is documented as undefined.   To be safe and keep things
+             *  in sync, don't use it. */
+            log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_DEBUG, TEXT("Unable to resolve the real path of %s as a relative reference: %s"), name, exe);
         }
     }
-    
+
     /* The file was not a direct relative reference.   If and only if it does not contain any relative path components, we can search the PATH. */
     if (_tcschr(exe, TEXT('/')) == NULL) {
         searchPath = _tgetenv(TEXT("PATH"));
@@ -3100,9 +4728,9 @@ TCHAR* findPathOf(const TCHAR *exe) {
         }
         if (searchPath) {
             if (wrapperData->isDebugging) {
-                log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_DEBUG, TEXT("Attempt to locate wrapper.java.command on system PATH: %s"), exe);
+                log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_DEBUG, TEXT("Attempt to locate %s on system PATH: %s"), name, exe);
             }
-            
+
             beg = searchPath;
             stop = 0; found = 0;
             do {
@@ -3110,17 +4738,17 @@ TCHAR* findPathOf(const TCHAR *exe) {
                 if (end == NULL) {
                     /* This is the last element in the PATH, so we want the whole thing. */
                     stop = 1;
-                    _tcscpy(pth, beg);
+                    _tcsncpy(pth, beg, PATH_MAX + 1);
                 } else {
                     /* Copy the single path entry. */
                     _tcsncpy(pth, beg, end - beg);
                     pth[end - beg] = TEXT('\0');
                 }
                 if (pth[_tcslen(pth) - 1] != TEXT('/')) {
-                    _tcscat(pth, TEXT("/"));
+                    _tcsncat(pth, TEXT("/"), PATH_MAX + 1);
                 }
-                _tcscat(pth, exe);
-                
+                _tcsncat(pth, exe, PATH_MAX + 1);
+
                 /* The file can exist on the path, but via a symbolic link, so we need to expand it.  Ignore errors here. */
 #ifdef _DEBUG
                 if (wrapperData->isDebugging) {
@@ -3129,38 +4757,38 @@ TCHAR* findPathOf(const TCHAR *exe) {
 #endif
                 if (_trealpath(pth, resolvedPath) != NULL) {
                     /* Copy over the result. */
-                    _tcscpy(pth, resolvedPath);
+                    _tcsncpy(pth, resolvedPath, PATH_MAX + 1);
                     found = checkIfExecutable(pth);
                 }
-                
+
                 if (!stop) {
                     beg = end + 1;
                 }
             } while (!stop && !found);
-            
+
 #if !defined(WIN32) && defined(UNICODE)
             free(searchPath);
 #endif
-            
+
             if (found) {
                 ret = malloc((_tcslen(pth) + 1) * sizeof(TCHAR));
                 if (!ret) {
                     outOfMemory(TEXT("FPO"), 3);
                     return NULL;
                 }
-                _tcscpy(ret, pth);
+                _tcsncpy(ret, pth, _tcslen(pth) + 1);
                 if (wrapperData->isDebugging) {
-                    log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_DEBUG, TEXT("Resolved the real path of wrapper.java.command from system PATH: %s"), ret);
+                    log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_DEBUG, TEXT("Resolved the real path of %s from system PATH: %s"), name, ret);
                 }
                 return ret;
             } else {
                 if (wrapperData->isDebugging) {
-                    log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_DEBUG, TEXT("Unable to resolve the real path of wrapper.java.command on the system PATH: %s"), exe);
+                    log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_DEBUG, TEXT("Unable to resolve the real path of %s on the system PATH: %s"), name, exe);
                 }
             }
         }
     }
-    
+
     /* Still did not find the file.  So it must not exist. */
     return NULL;
 }
@@ -3177,7 +4805,7 @@ void checkIfRegularExe(TCHAR** para) {
 #ifdef WIN32
     int len, start;
 #endif
-    
+
 #ifdef WIN32
     if (_tcschr(*para, TEXT('\"')) != NULL){
         start = 1;
@@ -3193,18 +4821,22 @@ void checkIfRegularExe(TCHAR** para) {
         _tcsncpy(path, (*para) + start, len);
         path[len] = TEXT('\0');
 #else
-    path = findPathOf(*para);
+    int replacePath;
+    path = findPathOf(*para, TEXT("wrapper.java.command"));
     if (!path) {
         log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_WARN, TEXT("The configured wrapper.java.command could not be found, attempting to launch anyway: %s"), *para);
     } else {
-        free(*para);
-        *para = malloc((_tcslen(path) + 1) * sizeof(TCHAR));
-        if (!(*para)) {
-            outOfMemory(TEXT("CIRE"), 2);
-            free(path);
-            return;
+        replacePath = getBooleanProperty(properties, TEXT("wrapper.java.command.resolve"), TRUE);
+        if (replacePath == TRUE) {
+            free(*para);
+            *para = malloc((_tcslen(path) + 1) * sizeof(TCHAR));
+            if (!(*para)) {
+                outOfMemory(TEXT("CIRE"), 2);
+                free(path);
+                return;
+            }
+            _tcsncpy(*para, path, _tcslen(path) + 1);
         }
-        _tcscpy(*para, path);
 #endif
         if (!checkIfBinary(path)) {
             log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_WARN, TEXT("The value of wrapper.java.command does not appear to be a java binary."));
@@ -3243,9 +4875,9 @@ int wrapperBuildJavaCommandArrayJavaCommand(TCHAR **strings, int addQuotes, int 
                         TEXT("Loaded java home from registry: %s"), cpPath);
                 }
 
-                addProperty(properties, TEXT("set.WRAPPER_JAVA_HOME"), cpPath, FALSE, FALSE, FALSE, TRUE);
+                addProperty(properties, NULL, 0, TEXT("set.WRAPPER_JAVA_HOME"), cpPath, TRUE, FALSE, FALSE, TRUE);
 
-                _tcscat(cpPath, TEXT("\\bin\\java.exe"));
+                _tcsncat(cpPath, TEXT("\\bin\\java.exe"), 512);
                 if (wrapperData->isDebugging) {
                     log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_DEBUG,
                         TEXT("Found Java Runtime Environment home directory in system registry."));
@@ -3358,9 +4990,9 @@ int wrapperBuildJavaCommandArrayJavaAdditional(TCHAR **strings, int addQuotes, i
     const TCHAR *prop;
     int i;
     size_t len;
-    TCHAR paramBuffer[128];
     TCHAR paramBuffer2[128];
     int quotable;
+    int defaultStripQuote;
     int stripQuote;
     TCHAR *propStripped;
     TCHAR **propertyNames;
@@ -3372,35 +5004,42 @@ int wrapperBuildJavaCommandArrayJavaAdditional(TCHAR **strings, int addQuotes, i
         return -1;
     }
 
+    defaultStripQuote = getBooleanProperty(properties, TEXT("wrapper.java.additional.default.stripquotes"), FALSE);
     i = 0;
     while (propertyNames[i]) {
         prop = propertyValues[i];
         if (prop) {
             if (_tcslen(prop) > 0) {
-                if (strings) {
-                    /* All additional parameters must begin with a - or they will be interpretted
-                     *  as the being the main class name by Java. */
-                    if (!((_tcsstr(prop, TEXT("-")) == prop) || (_tcsstr(prop, TEXT("\"-")) == prop))) {
+                /* All additional parameters must begin with a - or they will be interpretted
+                 *  as the being the main class name by Java. */
+                if (!((_tcsstr(prop, TEXT("-")) == prop) || (_tcsstr(prop, TEXT("\"-")) == prop))) {
+                    /* Only log the message on the second pass. */
+                    if (strings) {
                         log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_WARN,
                             TEXT("The value of property '%s', '%s' is not a valid argument to the JVM.  Skipping."),
-                            paramBuffer, prop);
-                        strings[index] = malloc(sizeof(TCHAR) * 1);
-                        if (!strings[index]) {
-                            outOfMemory(TEXT("WBJCAJA"), 1);
+                            propertyNames[i], prop);
+                    }
+                } else {
+                    if (strings) {
+                        /* is quotable also changes the value of the property!
+                           therefore prop can potentially point to free'd memory*/
+                        quotable = isQuotableProperty(properties, propertyNames[i]);
+                        prop = getStringProperty(properties, propertyNames[i], NULL);
+                        propertyValues[i] = (TCHAR*) prop;
+                        if (prop == NULL) {
+                            freeStringProperties(propertyNames, propertyValues, propertyIndices);
                             return -1;
                         }
-                        strings[index][0] = TEXT('\0');
-                    } else {
-                        quotable = isQuotableProperty(properties, paramBuffer);
                         _sntprintf(paramBuffer2, 128, TEXT("wrapper.java.additional.%lu.stripquotes"), propertyIndices[i]);
                         if (addQuotes) {
                             stripQuote = FALSE;
                         } else {
-                            stripQuote = getBooleanProperty(properties, paramBuffer2, FALSE);
+                            stripQuote = getBooleanProperty(properties, paramBuffer2, defaultStripQuote);
                         }
                         if (stripQuote) {
                             propStripped = malloc(sizeof(TCHAR) * (_tcslen(prop) + 1));
                             if (!propStripped) {
+                                freeStringProperties(propertyNames, propertyValues, propertyIndices);
                                 outOfMemory(TEXT("WBJCAJA"), 2);
                                 return -1;
                             }
@@ -3414,6 +5053,10 @@ int wrapperBuildJavaCommandArrayJavaAdditional(TCHAR **strings, int addQuotes, i
                             strings[index] = malloc(sizeof(TCHAR) * len);
                             if (!strings[index]) {
                                 outOfMemory(TEXT("WBJCAJA"), 3);
+                                freeStringProperties(propertyNames, propertyValues, propertyIndices);
+                                if (stripQuote) {
+                                    free(propStripped);
+                                }
                                 return -1;
                             }
                             wrapperQuoteValue(propStripped, strings[index], len);
@@ -3421,29 +5064,34 @@ int wrapperBuildJavaCommandArrayJavaAdditional(TCHAR **strings, int addQuotes, i
                             strings[index] = malloc(sizeof(TCHAR) * (_tcslen(propStripped) + 1));
                             if (!strings[index]) {
                                 outOfMemory(TEXT("WBJCAJA"), 4);
+                                freeStringProperties(propertyNames, propertyValues, propertyIndices);
+                                if (stripQuote) {
+                                    free(propStripped);
+                                }
                                 return -1;
                             }
                             _sntprintf(strings[index], _tcslen(propStripped) + 1, TEXT("%s"), propStripped);
                         }
 
                         if (addQuotes) {
-                            wrapperCheckQuotes(strings[index], paramBuffer);
+                            wrapperCheckQuotes(strings[index], propertyNames[i]);
                         }
 
                         if (stripQuote) {
                             free(propStripped);
                             propStripped = NULL;
                         }
-                    }
 
-                    /* Set if this paremeter enables debugging. */
-                    if (detectDebugJVM) {
-                        if (_tcsstr(strings[index], TEXT("-Xdebug")) == strings[index]) {
-                            wrapperData->debugJVM = TRUE;
+                        /* Set if this paremeter enables debugging. */
+                        if (detectDebugJVM) {
+                            if (_tcsstr(strings[index], TEXT("-Xdebug")) == strings[index]) {
+                                wrapperData->debugJVM = TRUE;
+                            }
                         }
                     }
+
+                    index++;
                 }
-                index++;
             }
             i++;
         }
@@ -3453,6 +5101,166 @@ int wrapperBuildJavaCommandArrayJavaAdditional(TCHAR **strings, int addQuotes, i
     return index;
 }
 
+/**
+ * Java command line callback.
+ */
+static int loadParameterFileCallbackParam_AddArg(LoadParameterFileCallbackParam *param, TCHAR *arg, size_t argLen)
+{
+    TCHAR str[MAX_PROPERTY_VALUE_LENGTH];
+    TCHAR *s;
+    size_t len;
+
+#ifdef _DEBUG
+    memcpy(str, arg, sizeof(TCHAR) * argLen);
+    str[argLen] = TEXT('\0');
+    log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_NOTICE, TEXT("    :> %s"), str);
+#endif
+
+    if (param->isJVMParam == TRUE) {
+        /* As in wrapperBuildJavaCommandArrayJavaAdditional(), skip an
+           argument which does not begin with '-'. */
+        if ((arg[0] != TEXT('-')) && !((arg[0] == TEXT('"')) && (arg[1] == TEXT('-')))) {
+            if (param->strings) {
+                memcpy(str, arg, sizeof(TCHAR) * argLen);
+                str[argLen] = TEXT('\0');
+                log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_WARN,
+                           TEXT("The value '%s' is not a valid argument to the JVM.  Skipping."), str);
+            }
+            return TRUE;
+        }
+    }
+
+    if (param->strings) {
+        if (!param->stripQuote) {
+            s = arg;
+            len = argLen;
+        } else {
+            len = wrapperStripQuotesInner(arg, argLen, str);
+            s = str;
+        }
+        param->strings[param->index] = malloc(sizeof(TCHAR) * (len + 1));
+        if (!param->strings[param->index]) {
+            return FALSE;
+        }
+        memcpy(param->strings[param->index], s, sizeof(TCHAR) * len);
+        param->strings[param->index][len] = TEXT('\0');
+    }
+    param->index++;
+    return TRUE;
+}
+
+static int loadParameterFileCallback(void *callbackParam, const TCHAR *fileName, int lineNumber, TCHAR *config, int debugProperties)
+{
+    LoadParameterFileCallbackParam *param = (LoadParameterFileCallbackParam *)callbackParam;
+    TCHAR *tail_bound;
+    TCHAR *arg;
+    TCHAR *s;
+    int InDelim = FALSE;
+    int InQuotes = FALSE;
+    int Escaped = FALSE;
+
+#ifdef _DEBUG
+    log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_NOTICE, TEXT("    : %s"), config);
+#endif
+
+    /* Assume that the line `config' has no white spaces at its
+       beginning and end. */
+    assert(config && _tcslen(config) > 0);
+    assert(config[0] != TEXT(' ') && config[_tcslen(config) - 1] != TEXT(' '));
+
+    tail_bound = config + _tcslen(config) + 1;
+    for (arg = s = config; s < tail_bound; s++) {
+        switch (*s) {
+        case TEXT('\0'):
+            if (!loadParameterFileCallbackParam_AddArg(param, arg, s - arg)) {
+                outOfMemory(TEXT("LJAC"), 1);
+                return FALSE;
+            }
+            break;
+        case TEXT(' '):
+            Escaped = FALSE;
+            if (!InDelim && !InQuotes) {
+                InDelim = TRUE;
+                if (!loadParameterFileCallbackParam_AddArg(param, arg, s - arg)) {
+                    outOfMemory(TEXT("LJAC"), 2);
+                    return FALSE;
+                }
+            }
+            break;
+        case TEXT('"'):
+            if (!Escaped) {
+                InQuotes = !InQuotes;
+            }
+            Escaped = FALSE;
+            if (InDelim) {
+                InDelim = FALSE;
+                arg = s;
+            }
+            break;
+        case TEXT('\\'):
+            Escaped = !Escaped;
+            if (InDelim) {
+                InDelim = FALSE;
+                arg = s;
+            }
+            break;
+        default:
+            Escaped = FALSE;
+            if (InDelim) {
+                InDelim = FALSE;
+                arg = s;
+            }
+            break;
+        }
+    }
+
+    return TRUE;
+}
+
+/**
+ * Builds up the additional section of the Java command line.
+ *
+ * @return The final index into the strings array, or -1 if there were any problems.
+ */
+int wrapperLoadParameterFile(TCHAR **strings, int addQuotes, int detectDebugJVM, int index, TCHAR *parameterName, int isJVMParameter) {
+    const TCHAR *parameterFilePath;
+    LoadParameterFileCallbackParam callbackParam;
+    ConfigFileReader reader;
+    int readResult;
+    TCHAR prop[256];
+
+    parameterFilePath = getFileSafeStringProperty(properties, parameterName, TEXT(""));
+#ifdef _DEBUG
+    log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_NOTICE,
+           TEXT("%s=%s"), parameterName, parameterFilePath ? parameterFilePath : TEXT(""));
+#endif
+    if (_tcslen(parameterFilePath) == 0) {
+        return index;
+    }
+
+    if (addQuotes) {
+        callbackParam.stripQuote = FALSE;
+    } else {
+        _sntprintf(prop, 256, TEXT("%s.stripquotes"), parameterName);
+        callbackParam.stripQuote = getBooleanProperty(properties, prop, FALSE);
+    }
+    callbackParam.strings = strings;
+    callbackParam.index = index;
+    callbackParam.isJVMParam = isJVMParameter;
+
+    configFileReader_Initialize(&reader, loadParameterFileCallback, &callbackParam, FALSE);
+    readResult = configFileReader_Read(&reader, parameterFilePath, TRUE, 0, NULL, 0);
+    switch (readResult) {
+    case CONFIG_FILE_READER_SUCCESS:
+        return callbackParam.index;
+    case CONFIG_FILE_READER_FAIL:
+    case CONFIG_FILE_READER_HARD_FAIL:
+        return -1;
+    default:
+        _tprintf(TEXT("Unexpected read error %d\n"), readResult);
+        return index;
+    };
+}
 
 /**
  * Builds up the library path section of the Java command line.
@@ -3732,6 +5540,7 @@ int wrapperBuildJavaClasspath(TCHAR **classpath) {
             propStripped = malloc(sizeof(TCHAR) * (_tcslen(prop) + 1));
             if (!propStripped) {
                 outOfMemory(TEXT("WBJCP"), 2);
+                freeStringProperties(propertyNames, propertyValues, propertyIndices);
                 return -1;
             }
             wrapperStripQuotes(prop, propStripped);
@@ -3749,6 +5558,10 @@ int wrapperBuildJavaClasspath(TCHAR **classpath) {
                 files = wrapperFileGetFiles(propStripped, WRAPPER_FILE_SORT_MODE_NAMES_ASC);
                 if (!files) {
                     /* Failed */
+                    if (propStripped != prop) {
+                        free(propStripped);
+                    }
+                    freeStringProperties(propertyNames, propertyValues, propertyIndices);
                     return -1;
                 }
 
@@ -3758,16 +5571,23 @@ int wrapperBuildJavaClasspath(TCHAR **classpath) {
                     len2 = _tcslen(files[cnt]);
 
                     /* Is there room for the entry? */
-                    while (cpLen + len2 + 3 > cpLenAlloc) {
+                    if (cpLen + len2 + 3 > cpLenAlloc) {
                         /* Resize the buffer */
                         tmpString = *classpath;
-                        cpLenAlloc += 1024;
+                        cpLenAlloc += len2 + 3;
                         *classpath = malloc(sizeof(TCHAR) * cpLenAlloc);
                         if (!*classpath) {
+                            if (propStripped != prop) {
+                                free(propStripped);
+                            }
+                            wrapperFileFreeFiles(files);
+                            freeStringProperties(propertyNames, propertyValues, propertyIndices);
                             outOfMemory(TEXT("WBJCP"), 2);
                             return -1;
                         }
-                        _sntprintf(*classpath, cpLenAlloc, TEXT("%s"), tmpString);
+                        if (j > 0) {
+                            _sntprintf(*classpath, cpLenAlloc, TEXT("%s"), tmpString);
+                        }
                         free(tmpString);
                         tmpString = NULL;
                     }
@@ -3793,6 +5613,7 @@ int wrapperBuildJavaClasspath(TCHAR **classpath) {
                         if (propStripped != prop) {
                             free(propStripped);
                         }
+                        freeStringProperties(propertyNames, propertyValues, propertyIndices);
                         return -1;
                     }
                     _tcsncpy(propBaseDir, propStripped, _tcslen(propStripped) - 1);
@@ -3821,19 +5642,22 @@ int wrapperBuildJavaClasspath(TCHAR **classpath) {
                 propBaseDir = NULL;
 
                 /* Is there room for the entry? */
-                while (cpLen + len2 + 3 > cpLenAlloc) {
+                if (cpLen + len2 + 3 > cpLenAlloc) {
                     /* Resize the buffer */
                     tmpString = *classpath;
-                    cpLenAlloc += 1024;
+                    cpLenAlloc += len2 + 3;
                     *classpath = malloc(sizeof(TCHAR) * cpLenAlloc);
                     if (!*classpath) {
                         outOfMemory(TEXT("WBJCP"), 4);
                         if (propStripped != prop) {
                             free(propStripped);
                         }
+                        freeStringProperties(propertyNames, propertyValues, propertyIndices);
                         return -1;
                     }
-                    _sntprintf(*classpath, cpLenAlloc, TEXT("%s"), tmpString);
+                    if (j > 0) {
+                        _sntprintf(*classpath, cpLenAlloc, TEXT("%s"), tmpString);
+                    }
                     free(tmpString);
                     tmpString = NULL;
                 }
@@ -3841,7 +5665,7 @@ int wrapperBuildJavaClasspath(TCHAR **classpath) {
                 if (j > 0) {
                     (*classpath)[cpLen++] = wrapperClasspathSeparator; /* separator */
                 }
-                _sntprintf(&((*classpath)[cpLen]), cpLenAlloc, TEXT("%s"), propStripped);
+                _sntprintf(&((*classpath)[cpLen]), cpLenAlloc - cpLen, TEXT("%s"), propStripped);
                 cpLen += len2;
                 j++;
             }
@@ -3936,6 +5760,7 @@ int wrapperBuildJavaCommandArrayAppParameters(TCHAR **strings, int addQuotes, in
     int i;
     int quotable;
     TCHAR *propStripped;
+    int defaultStripQuote;
     int stripQuote;
     TCHAR paramBuffer2[128];
     size_t len;
@@ -3947,6 +5772,8 @@ int wrapperBuildJavaCommandArrayAppParameters(TCHAR **strings, int addQuotes, in
         /* Failed */
         return -1;
     }
+
+    defaultStripQuote = getBooleanProperty(properties, TEXT("wrapper.app.parameter.default.stripquotes"), FALSE);
     i = 0;
     while (propertyNames[i]) {
         prop = propertyValues[i];
@@ -3960,40 +5787,49 @@ int wrapperBuildJavaCommandArrayAppParameters(TCHAR **strings, int addQuotes, in
                     if (addQuotes) {
                         stripQuote = FALSE;
                     } else {
-                        stripQuote = getBooleanProperty(properties, paramBuffer2, FALSE);
+                        stripQuote = getBooleanProperty(properties, paramBuffer2, defaultStripQuote);
                     }
                     if (stripQuote) {
                         propStripped = malloc(sizeof(TCHAR) * (_tcslen(prop) + 1));
                         if (!propStripped) {
                             outOfMemory(TEXT("WBJCAAP"), 1);
+                            freeStringProperties(propertyNames, propertyValues, propertyIndices);
                             return -1;
                         }
                         wrapperStripQuotes(prop, propStripped);
                     } else {
                         propStripped = (TCHAR *)prop;
                     }
-    
+
                     if (addQuotes && quotable && _tcschr(propStripped, TEXT(' '))) {
                         len = wrapperQuoteValue(propStripped, NULL, 0);
                         strings[index] = malloc(sizeof(TCHAR) * len);
                         if (!strings[index]) {
                             outOfMemory(TEXT("WBJCAAP"), 2);
+                            if (stripQuote) {
+                                free(propStripped);
+                            }
+                            freeStringProperties(propertyNames, propertyValues, propertyIndices);
                             return -1;
                         }
                         wrapperQuoteValue(propStripped, strings[index], len);
                     } else {
                         strings[index] = malloc(sizeof(TCHAR) * (_tcslen(propStripped) + 1));
                         if (!strings[index]) {
+                            if (stripQuote) {
+                                free(propStripped);
+                            }
+                            freeStringProperties(propertyNames, propertyValues, propertyIndices);
                             outOfMemory(TEXT("WBJCAAP"), 3);
                             return -1;
                         }
                         _sntprintf(strings[index], _tcslen(propStripped) + 1, TEXT("%s"), propStripped);
                     }
-    
+
                     if (addQuotes) {
                         wrapperCheckQuotes(strings[index], propertyNames[i]);
                     }
-    
+
                     if (stripQuote) {
                         free(propStripped);
                         propStripped = NULL;
@@ -4010,14 +5846,24 @@ int wrapperBuildJavaCommandArrayAppParameters(TCHAR **strings, int addQuotes, in
     if (wrapperData->javaArgValueCount > 0) {
         for (i = 0; i < wrapperData->javaArgValueCount; i++) {
             if (strings) {
-                strings[index] = malloc(sizeof(TCHAR) * (_tcslen(wrapperData->javaArgValues[i]) + 1));
-                if (!strings[index]) {
-                    outOfMemory(TEXT("WBJCAAP"), 4);
-                    return -1;
+                if (addQuotes && _tcschr(wrapperData->javaArgValues[i], TEXT(' '))) {
+                    len = wrapperQuoteValue(wrapperData->javaArgValues[i], NULL, 0);
+                    strings[index] = malloc(sizeof(TCHAR) * len);
+                    if (!strings[index]) {
+                        outOfMemory(TEXT("WBJCAAP"), 4);
+                        return -1;
+                    }
+                    wrapperQuoteValue(wrapperData->javaArgValues[i], strings[index], len);
+                 } else {
+                    strings[index] = malloc(sizeof(TCHAR) * (_tcslen(wrapperData->javaArgValues[i]) + 1));
+                    if (!strings[index]) {
+                        outOfMemory(TEXT("WBJCAAP"), 5);
+                        return -1;
+                    }
+                    _sntprintf(strings[index], _tcslen(wrapperData->javaArgValues[i]) + 1, TEXT("%s"), wrapperData->javaArgValues[i]);
                 }
-                _sntprintf(strings[index], _tcslen(wrapperData->javaArgValues[i]) + 1, TEXT("%s"), wrapperData->javaArgValues[i]);
             }
-            index++;    
+            index++;
         }
     }
     return index;
@@ -4036,9 +5882,11 @@ int wrapperBuildJavaCommandArrayInner(TCHAR **strings, int addQuotes, const TCHA
     int index;
     int detectDebugJVM;
     const TCHAR *prop;
-    int initMemory = 0, maxMemory;
+    int initMemory = 0;
+    int maxMemory;
     int thisIsTestWrapper;
 
+    setLogPropertyWarnings(properties, strings != NULL);
     index = 0;
 
     detectDebugJVM = getBooleanProperty(properties, TEXT("wrapper.java.detect_debug_jvm"), TRUE);
@@ -4049,8 +5897,26 @@ int wrapperBuildJavaCommandArrayInner(TCHAR **strings, int addQuotes, const TCHA
     }
 
     /* See if the auto bits parameter is set.  Ignored by all but the following platforms. */
-#if defined(HPUX) || defined(MACOSX) || defined(SOLARIS) || defined(FREEBSD)
-    if (getBooleanProperty(properties, TEXT("wrapper.java.additional.auto_bits"), FALSE)) {
+
+#if /*defined(WIN32) || defined(LINUX) ||*/ defined(HPUX) || defined(MACOSX) || defined(SOLARIS) || defined(FREEBSD)
+
+
+    if (getBooleanProperty(properties,
+/*#ifdef WIN32
+                              TEXT("wrapper.java.additional.auto_bits.windows"),
+#elif defined(LINUX)
+                              TEXT("wrapper.java.additional.auto_bits.linux"),
+*/
+#if defined(HPUX)
+                              TEXT("wrapper.java.additional.auto_bits.hpux"),
+#elif defined(SOLARIS)
+                              TEXT("wrapper.java.additional.auto_bits.solaris"),
+#elif defined(FREEBSD)
+                              TEXT("wrapper.java.additional.auto_bits.freebsd"),
+#elif defined(MACOSX)
+                              TEXT("wrapper.java.additional.auto_bits.macosx"),
+#endif
+                              getBooleanProperty(properties, TEXT("wrapper.java.additional.auto_bits"), FALSE))) {
         if (strings) {
             strings[index] = malloc(sizeof(TCHAR) * 5);
             if (!strings[index]) {
@@ -4065,6 +5931,11 @@ int wrapperBuildJavaCommandArrayInner(TCHAR **strings, int addQuotes, const TCHA
 
     /* Store additional java parameters */
     if ((index = wrapperBuildJavaCommandArrayJavaAdditional(strings, addQuotes, detectDebugJVM, index)) < 0) {
+        return -1;
+    }
+
+    /* Store additional java parameters specified in the parameter file */
+    if ((index = wrapperLoadParameterFile(strings, addQuotes, detectDebugJVM, index, TEXT("wrapper.java.additional_file"), TRUE)) < 0) {
         return -1;
     }
 
@@ -4127,55 +5998,80 @@ int wrapperBuildJavaCommandArrayInner(TCHAR **strings, int addQuotes, const TCHA
         }
     }
     index++;
-
-    /* Store the Wrapper server port */
-    if (strings) {
-        strings[index] = malloc(sizeof(TCHAR) * (15 + 5 + 1));  /* Port up to 5 characters */
-        if (!strings[index]) {
-            outOfMemory(TEXT("WBJCAI"), 25);
-            return -1;
-        }
-        _sntprintf(strings[index], 15 + 5 + 1, TEXT("-Dwrapper.port=%d"), (int)wrapperData->actualPort);
-    }
-    index++;
-
-    /* Store the Wrapper jvm min and max ports. */
-    if (wrapperData->jvmPort > 0) {
+    
+    /* Store the backend connection information. */
+    if (wrapperData->backendType == WRAPPER_BACKEND_TYPE_PIPE) {
         if (strings) {
-            strings[index] = malloc(sizeof(TCHAR) * (19 + 5 + 1));  /* Port up to 5 characters */
+            strings[index] = malloc(sizeof(TCHAR) * (22 + 1));
+            if (!strings[index]) {
+                outOfMemory(TEXT("WBJCAI"), 25);
+                return -1;
+            }
+            _sntprintf(strings[index], 22 + 1, TEXT("-Dwrapper.backend=pipe"));
+        }
+        index++;
+    } else {
+        /* Store the Wrapper server port */
+        if (strings) {
+            strings[index] = malloc(sizeof(TCHAR) * (15 + 5 + 1));  /* Port up to 5 characters */
             if (!strings[index]) {
                 outOfMemory(TEXT("WBJCAI"), 26);
                 return -1;
             }
-            _sntprintf(strings[index], 19 + 5 + 1, TEXT("-Dwrapper.jvm.port=%d"), (int)wrapperData->jvmPort);
+            _sntprintf(strings[index], 15 + 5 + 1, TEXT("-Dwrapper.port=%d"), (int)wrapperData->actualPort);
         }
         index++;
     }
-    if (strings) {
-        strings[index] = malloc(sizeof(TCHAR) * (23 + 5 + 1));  /* Port up to 5 characters */
-        if (!strings[index]) {
-            outOfMemory(TEXT("WBJCAI"), 27);
-            return -1;
-        }
-        _sntprintf(strings[index], 23 + 5 + 1, TEXT("-Dwrapper.jvm.port.min=%d"), (int)wrapperData->jvmPortMin);
-    }
-    index++;
-    if (strings) {
-        strings[index] = malloc(sizeof(TCHAR) * (23 + 5 + 1));  /* Port up to 5 characters */
-        if (!strings[index]) {
-            outOfMemory(TEXT("WBJCAI"), 28);
-            return -1;
-        }
-        _sntprintf(strings[index], 23 + 5 + 1, TEXT("-Dwrapper.jvm.port.max=%d"), (int)wrapperData->jvmPortMax);
-    }
-    index++;
 
+    /* Store the Wrapper jvm min and max ports. */
+    if (wrapperData->backendType == WRAPPER_BACKEND_TYPE_SOCKET) {
+        if (wrapperData->portAddress != NULL) {
+            if (strings) {
+                strings[index] = malloc(sizeof(TCHAR) * (_tcslen(TEXT("-Dwrapper.port.address=")) + _tcslen(wrapperData->portAddress) + 1));
+                if (!strings[index]) {
+                    outOfMemory(TEXT("WBJCAI"), 27);
+                    return -1;
+                }
+                _sntprintf(strings[index], _tcslen(TEXT("-Dwrapper.port.address=")) + _tcslen(wrapperData->portAddress) + 1, TEXT("-Dwrapper.port.address=%s"), wrapperData->portAddress);
+            }
+            index++;
+        }
+        if (wrapperData->jvmPort >= 0) {
+            if (strings) {
+                strings[index] = malloc(sizeof(TCHAR) * (19 + 5 + 1));  /* Port up to 5 characters */
+                if (!strings[index]) {
+                    outOfMemory(TEXT("WBJCAI"), 28);
+                    return -1;
+                }
+                _sntprintf(strings[index], 19 + 5 + 1, TEXT("-Dwrapper.jvm.port=%d"), (int)wrapperData->jvmPort);
+            }
+            index++;
+        }
+        if (strings) {
+            strings[index] = malloc(sizeof(TCHAR) * (23 + 5 + 1));  /* Port up to 5 characters */
+            if (!strings[index]) {
+                outOfMemory(TEXT("WBJCAI"), 29);
+                return -1;
+            }
+            _sntprintf(strings[index], 23 + 5 + 1, TEXT("-Dwrapper.jvm.port.min=%d"), (int)wrapperData->jvmPortMin);
+        }
+        index++;
+        if (strings) {
+            strings[index] = malloc(sizeof(TCHAR) * (23 + 5 + 1));  /* Port up to 5 characters */
+            if (!strings[index]) {
+                outOfMemory(TEXT("WBJCAI"), 30);
+                return -1;
+            }
+            _sntprintf(strings[index], 23 + 5 + 1, TEXT("-Dwrapper.jvm.port.max=%d"), (int)wrapperData->jvmPortMax);
+        }
+        index++;
+    }
     /* Store the Wrapper debug flag */
     if (wrapperData->isDebugging) {
         if (strings) {
             strings[index] = malloc(sizeof(TCHAR) * (22 + 1));
             if (!strings[index]) {
-                outOfMemory(TEXT("WBJCAI"), 29);
+                outOfMemory(TEXT("WBJCAI"), 31);
                 return -1;
             }
             if (addQuotes) {
@@ -4198,7 +6094,7 @@ int wrapperBuildJavaCommandArrayInner(TCHAR **strings, int addQuotes, const TCHA
         if (strings) {
             strings[index] = malloc(sizeof(TCHAR) * (38 + 1));
             if (!strings[index]) {
-                outOfMemory(TEXT("WBJCAI"), 29);
+                outOfMemory(TEXT("WBJCAI"), 32);
                 return -1;
             }
             if (addQuotes) {
@@ -4215,7 +6111,7 @@ int wrapperBuildJavaCommandArrayInner(TCHAR **strings, int addQuotes, const TCHA
         if (strings) {
             strings[index] = malloc(sizeof(TCHAR) * (38 + 1));
             if (!strings[index]) {
-                outOfMemory(TEXT("WBJCAI"), 30);
+                outOfMemory(TEXT("WBJCAI"), 33);
                 return -1;
             }
             if (addQuotes) {
@@ -4231,7 +6127,7 @@ int wrapperBuildJavaCommandArrayInner(TCHAR **strings, int addQuotes, const TCHA
     if (strings) {
         strings[index] = malloc(sizeof(TCHAR) * (24 + 1)); /* Pid up to 10 characters */
         if (!strings[index]) {
-            outOfMemory(TEXT("WBJCAI"), 31);
+            outOfMemory(TEXT("WBJCAI"), 34);
             return -1;
         }
 #if defined(SOLARIS) && (!defined(_LP64))
@@ -4247,7 +6143,7 @@ int wrapperBuildJavaCommandArrayInner(TCHAR **strings, int addQuotes, const TCHA
         if (strings) {
             strings[index] = malloc(sizeof(TCHAR) * (32 + 1));
             if (!strings[index]) {
-                outOfMemory(TEXT("WBJCAI"), 32);
+                outOfMemory(TEXT("WBJCAI"), 35);
                 return -1;
             }
             if (addQuotes) {
@@ -4264,7 +6160,7 @@ int wrapperBuildJavaCommandArrayInner(TCHAR **strings, int addQuotes, const TCHA
             if (strings) {
                 strings[index] = malloc(sizeof(TCHAR) * (43 + 1)); /* Allow for 10 digits */
                 if (!strings[index]) {
-                    outOfMemory(TEXT("WBJCAI"), 33);
+                    outOfMemory(TEXT("WBJCAI"), 36);
                     return -1;
                 }
                 if (addQuotes) {
@@ -4279,7 +6175,7 @@ int wrapperBuildJavaCommandArrayInner(TCHAR **strings, int addQuotes, const TCHA
             if (strings) {
                 strings[index] = malloc(sizeof(TCHAR) * (43 + 1)); /* Allow for 10 digits */
                 if (!strings[index]) {
-                    outOfMemory(TEXT("WBJCAI"), 34);
+                    outOfMemory(TEXT("WBJCAI"), 37);
                     return -1;
                 }
                 if (addQuotes) {
@@ -4297,7 +6193,7 @@ int wrapperBuildJavaCommandArrayInner(TCHAR **strings, int addQuotes, const TCHA
     if (strings) {
         strings[index] = malloc(sizeof(TCHAR) * (20 + _tcslen(wrapperVersion) + 1));
         if (!strings[index]) {
-            outOfMemory(TEXT("WBJCAI"), 35);
+            outOfMemory(TEXT("WBJCAI"), 37);
             return -1;
         }
         if (addQuotes) {
@@ -4312,7 +6208,7 @@ int wrapperBuildJavaCommandArrayInner(TCHAR **strings, int addQuotes, const TCHA
     if (strings) {
         strings[index] = malloc(sizeof(TCHAR) * (27 + _tcslen(wrapperData->nativeLibrary) + 1));
         if (!strings[index]) {
-            outOfMemory(TEXT("WBJCAI"), 36);
+            outOfMemory(TEXT("WBJCAI"), 38);
             return -1;
         }
         if (addQuotes) {
@@ -4323,12 +6219,27 @@ int wrapperBuildJavaCommandArrayInner(TCHAR **strings, int addQuotes, const TCHA
     }
     index++;
 
+    /* Store the arch name of the wrapper. */
+    if (strings) {
+        strings[index] = malloc(sizeof(TCHAR) * (17 + _tcslen(wrapperArch) + 1));
+        if (!strings[index]) {
+            outOfMemory(TEXT("WBJCAI"), 39);
+            return -1;
+        }
+        if (addQuotes) {
+            _sntprintf(strings[index], 17 + _tcslen(wrapperArch) + 1, TEXT("-Dwrapper.arch=\"%s\""), wrapperArch);
+        } else {
+            _sntprintf(strings[index], 17 + _tcslen(wrapperArch) + 1, TEXT("-Dwrapper.arch=%s"), wrapperArch);
+        }
+    }
+    index++;
+
     /* Store the ignore signals flag if configured to do so */
     if (wrapperData->ignoreSignals & WRAPPER_IGNORE_SIGNALS_JAVA) {
         if (strings) {
             strings[index] = malloc(sizeof(TCHAR) * (31 + 1));
             if (!strings[index]) {
-                outOfMemory(TEXT("WBJCAI"), 37);
+                outOfMemory(TEXT("WBJCAI"), 40);
                 return -1;
             }
             if (addQuotes) {
@@ -4341,15 +6252,11 @@ int wrapperBuildJavaCommandArrayInner(TCHAR **strings, int addQuotes, const TCHA
     }
 
     /* If this is being run as a service, add a service flag. */
-#ifdef WIN32
     if (!wrapperData->isConsole) {
-#else
-    if (wrapperData->daemonize) {
-#endif
         if (strings) {
             strings[index] = malloc(sizeof(TCHAR) * (24 + 1));
             if (!strings[index]) {
-                outOfMemory(TEXT("WBJCAI"), 38);
+                outOfMemory(TEXT("WBJCAI"), 41);
                 return -1;
             }
             if (addQuotes) {
@@ -4361,12 +6268,29 @@ int wrapperBuildJavaCommandArrayInner(TCHAR **strings, int addQuotes, const TCHA
         index++;
     }
 
+    /* Store the Disable Tests flag */
+    if (wrapperData->isTestsDisabled) {
+        if (strings) {
+            strings[index] = malloc(sizeof(TCHAR) * (30 + 1));
+            if (!strings[index]) {
+                outOfMemory(TEXT("WBJCAI"), 42);
+                return -1;
+            }
+            if (addQuotes) {
+                _sntprintf(strings[index], 30 + 1, TEXT("-Dwrapper.disable_tests=\"TRUE\""));
+            } else {
+                _sntprintf(strings[index], 30 + 1, TEXT("-Dwrapper.disable_tests=TRUE"));
+            }
+        }
+        index++;
+    }
+
     /* Store the Disable Shutdown Hook flag */
     if (wrapperData->isShutdownHookDisabled) {
         if (strings) {
             strings[index] = malloc(sizeof(TCHAR) * (38 + 1));
             if (!strings[index]) {
-                outOfMemory(TEXT("WBJCAI"), 39);
+                outOfMemory(TEXT("WBJCAI"), 43);
                 return -1;
             }
             if (addQuotes) {
@@ -4383,7 +6307,7 @@ int wrapperBuildJavaCommandArrayInner(TCHAR **strings, int addQuotes, const TCHA
         /* Just to be safe, allow 20 characters for the timeout value */
         strings[index] = malloc(sizeof(TCHAR) * (24 + 20 + 1));
         if (!strings[index]) {
-            outOfMemory(TEXT("WBJCAI"), 40);
+            outOfMemory(TEXT("WBJCAI"), 44);
             return -1;
         }
         if (addQuotes) {
@@ -4394,17 +6318,66 @@ int wrapperBuildJavaCommandArrayInner(TCHAR **strings, int addQuotes, const TCHA
     }
     index++;
 
+    if ((prop = getStringProperty(properties, TEXT("wrapper.java.outfile"), NULL))) {
+        if (strings) {
+            strings[index] = malloc(sizeof(TCHAR) * (25 + _tcslen(prop) + 1));
+            if (!strings[index]) {
+                outOfMemory(TEXT("WBJCAI"), 46);
+                return -1;
+            }
+            if (addQuotes) {
+                _sntprintf(strings[index], 25 + _tcslen(prop) + 1, TEXT("-Dwrapper.java.outfile=\"%s\""), prop);
+            } else {
+                _sntprintf(strings[index], 25 + _tcslen(prop) + 1, TEXT("-Dwrapper.java.outfile=%s"), prop);
+            }
+        }
+        index++;
+    }
+
+    if ((prop = getStringProperty(properties, TEXT("wrapper.java.errfile"), NULL))) {
+        if (strings) {
+            strings[index] = malloc(sizeof(TCHAR) * (25 + _tcslen(prop) + 1));
+            if (!strings[index]) {
+                outOfMemory(TEXT("WBJCAI"), 47);
+                return -1;
+            }
+            if (addQuotes) {
+                _sntprintf(strings[index],  25 + _tcslen(prop) + 1, TEXT("-Dwrapper.java.errfile=\"%s\""), prop);
+            } else {
+                _sntprintf(strings[index], 25 + _tcslen(prop) + 1, TEXT("-Dwrapper.java.errfile=%s"), prop);
+            }
+        }
+        index++;
+    }
+
     /* Store the Wrapper JVM ID.  (Get here before incremented) */
     if (strings) {
         strings[index] = malloc(sizeof(TCHAR) * (16 + 5 + 1));  /* jvmid up to 5 characters */
         if (!strings[index]) {
-            outOfMemory(TEXT("WBJCAI"), 41);
+            outOfMemory(TEXT("WBJCAI"), 48);
             return -1;
         }
         _sntprintf(strings[index], 16 + 5 + 1, TEXT("-Dwrapper.jvmid=%d"), (wrapperData->jvmRestarts + 1));
     }
     index++;
 
+
+    /* If this JVM will be detached after startup, it needs to know that. */
+    if (wrapperData->detachStarted) {
+        if (strings) {
+            strings[index] = malloc(sizeof(TCHAR) * (30 + 1));
+            if (!strings[index]) {
+                outOfMemory(TEXT("WBJCAI"), 51);
+                return -1;
+            }
+            if (addQuotes) {
+                _sntprintf(strings[index], 30 + 1, TEXT("-Dwrapper.detachStarted=\"TRUE\""));
+            } else {
+                _sntprintf(strings[index], 30 + 1, TEXT("-Dwrapper.detachStarted=TRUE"));
+            }
+        }
+        index++;
+    }
 
     /* Store the main class */
     thisIsTestWrapper = FALSE;
@@ -4417,7 +6390,7 @@ int wrapperBuildJavaCommandArrayInner(TCHAR **strings, int addQuotes, const TCHA
     if (strings) {
         strings[index] = malloc(sizeof(TCHAR) * (_tcslen(prop) + 1));
         if (!strings[index]) {
-            outOfMemory(TEXT("WBJCAI"), 42);
+            outOfMemory(TEXT("WBJCAI"), 52);
             return -1;
         }
         _sntprintf(strings[index], _tcslen(prop) + 1, TEXT("%s"), prop);
@@ -4426,6 +6399,10 @@ int wrapperBuildJavaCommandArrayInner(TCHAR **strings, int addQuotes, const TCHA
 
     /* Store any application parameters */
     if ((index = wrapperBuildJavaCommandArrayAppParameters(strings, addQuotes, index, thisIsTestWrapper)) < 0) {
+        return -1;
+    }
+
+    if ((index = wrapperLoadParameterFile(strings, addQuotes, detectDebugJVM, index, TEXT("wrapper.app.parameter_file"), FALSE)) < 0) {
         return -1;
     }
 
@@ -4454,7 +6431,7 @@ int wrapperBuildJavaCommandArray(TCHAR ***stringsPtr, int *length, int addQuotes
 
     /* Allocate the correct amount of memory */
     *stringsPtr = malloc((*length) * sizeof **stringsPtr );
-    if (!stringsPtr) {
+    if (!(*stringsPtr)) {
         outOfMemory(TEXT("WBJCA"), 1);
         return TRUE;
     }
@@ -4527,6 +6504,7 @@ void wrapperJVMProcessExited(TICKS nowTicks, int exitCode) {
     switch(wrapperData->jState) {
     case WRAPPER_JSTATE_DOWN_CLEAN:
     case WRAPPER_JSTATE_DOWN_CHECK:
+    case WRAPPER_JSTATE_DOWN_FLUSH:
         /* Shouldn't be called in this state.  But just in case. */
         if (wrapperData->isDebugging) {
             log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_DEBUG,
@@ -4546,7 +6524,7 @@ void wrapperJVMProcessExited(TICKS nowTicks, int exitCode) {
         }
         setState = FALSE;
         break;
-        
+
     case WRAPPER_JSTATE_RESTART:
         /* We got a message that the JVM process died when we already thought is was down.
          *  Most likely this was caused by a SIGCHLD signal.  We are already in the expected
@@ -4618,27 +6596,18 @@ void wrapperJVMProcessExited(TICKS nowTicks, int exitCode) {
             TEXT("JVM exited on its own while waiting to kill the application."));
         break;
 
+    case WRAPPER_JSTATE_KILLED:
+        log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS,
+            TEXT("JVM exited after being requested to terminate."));
+        break;
+
     default:
         log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_WARN,
             TEXT("Unexpected jState=%d in wrapperJVMProcessExited."), wrapperData->jState);
         break;
     }
 
-    /* Only set the state to DOWN_CHECK if we are not already in a state which reflects this. */
-    if (setState) {
-        if (wrapperData->jvmCleanupTimeout > 0) {
-            wrapperSetJavaState(WRAPPER_JSTATE_DOWN_CHECK, wrapperGetTicks(), wrapperData->jvmCleanupTimeout);
-        } else {
-            wrapperSetJavaState(WRAPPER_JSTATE_DOWN_CHECK, wrapperGetTicks(), -1);
-        }
-    }
-
-    wrapperProtocolClose();
-
-    /* Remove java pid file if it was registered and created by this process. */
-    if (wrapperData->javaPidFilename) {
-        _tunlink(wrapperData->javaPidFilename);
-    }
+    wrapperJVMDownCleanup(setState);
 }
 
 void wrapperBuildKey() {
@@ -4680,27 +6649,6 @@ void wrapperBuildKey() {
     */
 }
 
-/**
- * Updates a string value by making a copy of the original.  Any old value is
- *  first freed.
- */
-void updateStringValue(TCHAR **ptr, const TCHAR *value) {
-    if (*ptr != NULL) {
-        free(*ptr);
-        *ptr = NULL;
-    }
-
-    if (value != NULL) {
-        *ptr = malloc(sizeof(TCHAR) * (_tcslen(value) + 1));
-        if (!ptr) {
-            outOfMemory(TEXT("USV"), 1);
-            /* TODO: This is pretty bad.  Not sure how to recover... */
-        } else {
-            _tcscpy(*ptr, value);
-        }
-    }
-}
-
 #ifdef WIN32
 
 /* The ABOVE and BELOW normal priority class constants are not defined in MFVC 6.0 headers. */
@@ -4717,7 +6665,9 @@ void updateStringValue(TCHAR **ptr, const TCHAR *value) {
 int wrapperBuildNTServiceInfo() {
     TCHAR *work;
     const TCHAR *priority;
-    size_t len, valLen;
+    size_t len;
+    size_t valLen;
+    size_t workLen;
     int i;
     TCHAR **propertyNames;
     TCHAR **propertyValues;
@@ -4756,14 +6706,16 @@ int wrapperBuildNTServiceInfo() {
             outOfMemory(TEXT("WBNTSI"), 1);
             return TRUE;
         }
+        workLen = len;
 
         /* Now actually build up the list. Each value is separated with a '\0'. */
         i = 0;
         while (propertyNames[i]) {
             valLen = _tcslen(propertyValues[i]);
             if (valLen > 0) {
-                _tcscpy(work, propertyValues[i]);
+                _tcsncpy(work, propertyValues[i], workLen);
                 work += valLen + 1;
+                workLen -= valLen + 1;
             }
             i++;
         }
@@ -4805,9 +6757,14 @@ int wrapperBuildNTServiceInfo() {
             wrapperData->ntServiceAccount = NULL;
         }
 
-        /* Acount password */
-        wrapperData->ntServicePasswordPrompt = getBooleanProperty( properties, TEXT("wrapper.ntservice.password.prompt"), FALSE );
-        wrapperData->ntServicePasswordPromptMask = getBooleanProperty( properties, TEXT("wrapper.ntservice.password.prompt.mask"), TRUE );
+        /* Account password */
+        wrapperData->ntServicePrompt = getBooleanProperty(properties, TEXT("wrapper.ntservice.account.prompt"), FALSE);
+        if (wrapperData->ntServicePrompt == TRUE) {
+            wrapperData->ntServicePasswordPrompt = TRUE;
+        } else {
+            wrapperData->ntServicePasswordPrompt = getBooleanProperty(properties, TEXT("wrapper.ntservice.password.prompt"), FALSE);
+        }
+        wrapperData->ntServicePasswordPromptMask = getBooleanProperty(properties, TEXT("wrapper.ntservice.password.prompt.mask"), TRUE);
         updateStringValue(&wrapperData->ntServicePassword, getStringProperty(properties, TEXT("wrapper.ntservice.password"), NULL));
         if ( wrapperData->ntServicePassword && ( _tcslen( wrapperData->ntServicePassword ) <= 0 ) ) {
             wrapperData->ntServicePassword = NULL;
@@ -4818,7 +6775,7 @@ int wrapperBuildNTServiceInfo() {
         }
 
         /* Interactive */
-        wrapperData->ntServiceInteractive = getBooleanProperty( properties, TEXT("wrapper.ntservice.interactive"), FALSE );
+        wrapperData->ntServiceInteractive = getBooleanProperty(properties, TEXT("wrapper.ntservice.interactive"), FALSE);
         /* The interactive flag can not be set if an account is also set. */
         if (wrapperData->ntServiceAccount && wrapperData->ntServiceInteractive) {
             log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_WARN,
@@ -4827,19 +6784,19 @@ int wrapperBuildNTServiceInfo() {
         }
 
         /* Display a Console Window. */
-        wrapperData->ntAllocConsole = getBooleanProperty( properties, TEXT("wrapper.ntservice.console"), FALSE );
+        wrapperData->ntAllocConsole = getBooleanProperty(properties, TEXT("wrapper.ntservice.console"), FALSE);
         /* Set the default hide wrapper console flag to the inverse of the alloc console flag. */
         wrapperData->ntHideWrapperConsole = !wrapperData->ntAllocConsole;
 
         /* Hide the JVM Console Window. */
-        wrapperData->ntHideJVMConsole = getBooleanProperty( properties, TEXT("wrapper.ntservice.hide_console"), TRUE );
+        wrapperData->ntHideJVMConsole = getBooleanProperty(properties, TEXT("wrapper.ntservice.hide_console"), TRUE);
 
         /* Make sure that a console is always generated to support thread dumps */
-        wrapperData->generateConsole = getBooleanProperty( properties, TEXT("wrapper.ntservice.generate_console"), TRUE );
+        wrapperData->generateConsole = getBooleanProperty(properties, TEXT("wrapper.ntservice.generate_console"), TRUE);
     }
 
     /* Set the single invocation flag. */
-    wrapperData->isSingleInvocation = getBooleanProperty( properties, TEXT("wrapper.single_invocation"), FALSE );
+    wrapperData->isSingleInvocation = getBooleanProperty(properties, TEXT("wrapper.single_invocation"), FALSE);
 
     wrapperData->threadDumpControlCode = getIntProperty(properties, TEXT("wrapper.thread_dump_control_code"), 255);
     if (wrapperData->threadDumpControlCode <= 0) {
@@ -4854,57 +6811,23 @@ int wrapperBuildNTServiceInfo() {
 }
 #endif
 
-#ifndef WIN32 /* UNIX */
-int getSignalMode(const TCHAR *modeName, int defaultMode) {
-    if (!modeName) {
-        return defaultMode;
-    }
-
-    if (strcmpIgnoreCase(modeName, TEXT("IGNORE")) == 0) {
-        return WRAPPER_SIGNAL_MODE_IGNORE;
-    } else if (strcmpIgnoreCase(modeName, TEXT("RESTART")) == 0) {
-        return WRAPPER_SIGNAL_MODE_RESTART;
-    } else if (strcmpIgnoreCase(modeName, TEXT("SHUTDOWN")) == 0) {
-        return WRAPPER_SIGNAL_MODE_SHUTDOWN;
-    } else if (strcmpIgnoreCase(modeName, TEXT("FORWARD")) == 0) {
-        return WRAPPER_SIGNAL_MODE_FORWARD;
-    } else {
-        return defaultMode;
-    }
-}
-
-/**
- * Return FALSE if successful, TRUE if there were problems.
- */
-int wrapperBuildUnixDaemonInfo() {
-    if (!wrapperData->configured) {
-        /** Get the daemonize flag. */
-        wrapperData->daemonize = getBooleanProperty(properties, TEXT("wrapper.daemonize"), FALSE);
-        /** Configure the HUP signal handler. */
-        wrapperData->signalHUPMode = getSignalMode(getStringProperty(properties, TEXT("wrapper.signal.mode.hup"), NULL), WRAPPER_SIGNAL_MODE_FORWARD);
-
-        /** Configure the USR1 signal handler. */
-        wrapperData->signalUSR1Mode = getSignalMode(getStringProperty(properties, TEXT("wrapper.signal.mode.usr1"), NULL), WRAPPER_SIGNAL_MODE_FORWARD);
-
-        /** Configure the USR2 signal handler. */
-        wrapperData->signalUSR2Mode = getSignalMode(getStringProperty(properties, TEXT("wrapper.signal.mode.usr2"), NULL), WRAPPER_SIGNAL_MODE_FORWARD);
-    }
-
-    return FALSE;
-}
-#endif
-
 int validateTimeout(const TCHAR* propertyName, int value) {
+    int okValue;
     if (value <= 0) {
-        return 0;
+        okValue = 0;
     } else if (value > WRAPPER_TIMEOUT_MAX) {
-        log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_WARN,
-            TEXT("%s must be in the range 0 to %d days (%d seconds).  Changing to %d."),
-            propertyName, WRAPPER_TIMEOUT_MAX / 86400, WRAPPER_TIMEOUT_MAX, WRAPPER_TIMEOUT_MAX);
-        return WRAPPER_TIMEOUT_MAX;
+        okValue = WRAPPER_TIMEOUT_MAX;
     } else {
-        return value;
+        okValue = value;
     }
+
+    if (okValue != value) {
+        log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_WARN,
+            TEXT("The value of %s must be in the range 1 to %d seconds (%d days), or 0 to disable.  Changing to %d."),
+            propertyName, WRAPPER_TIMEOUT_MAX, WRAPPER_TIMEOUT_MAX / 86400, okValue);
+    }
+
+    return okValue;
 }
 
 void wrapperLoadHostName() {
@@ -4944,16 +6867,17 @@ void wrapperLoadHostName() {
             outOfMemory(TEXT("LHN"), 3);
             return;
         }
-        _tcscpy(hostName2, hostName);
+        _tcsncpy(hostName2, hostName, len);
 #endif
 
         wrapperData->hostName = malloc(sizeof(TCHAR) * (_tcslen(hostName2) + 1));
         if (!wrapperData->hostName) {
             outOfMemory(TEXT("LHN"), 2);
+            free(hostName2);
             return;
         }
-        _tcscpy(wrapperData->hostName, hostName2);
-        
+        _tcsncpy(wrapperData->hostName, hostName2, _tcslen(hostName2) + 1);
+
         free(hostName2);
     }
 }
@@ -4988,6 +6912,10 @@ int getActionForName(TCHAR *actionName, const TCHAR *propertyName, int logErrors
         action = ACTION_NONE;
     } else if (_tcscmp(actionName, TEXT("DEBUG")) == 0) {
         action = ACTION_DEBUG;
+    } else if (_tcscmp(actionName, TEXT("SUCCESS")) == 0) {
+        action = ACTION_SUCCESS;
+    } else if (_tcscmp(actionName, TEXT("GC")) == 0) {
+        action = ACTION_GC;
     } else if (_tcscmp(actionName, TEXT("PAUSE")) == 0) {
         if (logErrors) {
             log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_WARN, TEXT("Pause actions require the Standard Edition.  Ignoring action '%s' in the %s property."), actionName, propertyName);
@@ -5043,7 +6971,7 @@ int *wrapperGetActionListForNames(const TCHAR *actionNameList, const TCHAR *prop
         outOfMemory(TEXT("GALFN"), 1);
     } else {
         actionCount = 0;
-        _tcscpy(workBuffer, actionNameList);
+        _tcsncpy(workBuffer, actionNameList, len + 1);
         token = _tcstok(workBuffer, TEXT(" ,")
 #if defined(UNICODE) && !defined(WIN32)
             , &state
@@ -5075,7 +7003,7 @@ int *wrapperGetActionListForNames(const TCHAR *actionNameList, const TCHAR *prop
         } else {
             /* Now actually pull out the actions */
             actionCount = 0;
-            _tcscpy(workBuffer, actionNameList);
+            _tcsncpy(workBuffer, actionNameList, len + 1);
             token = _tcstok(workBuffer, TEXT(" ,")
 #if defined(UNICODE) && !defined(WIN32)
             , &state
@@ -5142,8 +7070,15 @@ int loadConfigurationTriggers() {
             wrapperData->outputFilterActionLists = NULL;
         }
 
+        /* Individual messages are references to property values and are not malloced. */
         free(wrapperData->outputFilterMessages);
         wrapperData->outputFilterMessages = NULL;
+
+        free(wrapperData->outputFilterAllowWildFlags);
+        wrapperData->outputFilterAllowWildFlags = NULL;
+
+        free(wrapperData->outputFilterMinLens);
+        wrapperData->outputFilterMinLens = NULL;
     }
 
     wrapperData->outputFilterCount = 0;
@@ -5151,6 +7086,8 @@ int loadConfigurationTriggers() {
         /* Failed */
         return TRUE;
     }
+
+    /* Loop over the properties and count how many triggers there are. */
     i = 0;
     while (propertyNames[i]) {
         wrapperData->outputFilterCount++;
@@ -5160,6 +7097,7 @@ int loadConfigurationTriggers() {
     wrapperData->outputFilterCount++;
     i++;
 #endif
+
     /* Now that a count is known, allocate memory to hold the filters and actions and load them in. */
     if (wrapperData->outputFilterCount > 0) {
         wrapperData->outputFilters = malloc(sizeof(TCHAR *) * wrapperData->outputFilterCount);
@@ -5167,6 +7105,7 @@ int loadConfigurationTriggers() {
             outOfMemory(TEXT("LC"), 1);
             return TRUE;
         }
+        memset(wrapperData->outputFilters, 0, sizeof(TCHAR *) * wrapperData->outputFilterCount);
 
         wrapperData->outputFilterActionLists = malloc(sizeof(int*) * wrapperData->outputFilterCount);
         if (!wrapperData->outputFilterActionLists) {
@@ -5177,9 +7116,23 @@ int loadConfigurationTriggers() {
 
         wrapperData->outputFilterMessages = malloc(sizeof(TCHAR *) * wrapperData->outputFilterCount);
         if (!wrapperData->outputFilterMessages) {
-            outOfMemory(TEXT("LC"), 1);
+            outOfMemory(TEXT("LC"), 3);
             return TRUE;
         }
+
+        wrapperData->outputFilterAllowWildFlags = malloc(sizeof(int) * wrapperData->outputFilterCount);
+        if (!wrapperData->outputFilterAllowWildFlags) {
+            outOfMemory(TEXT("LC"), 4);
+            return TRUE;
+        }
+        memset(wrapperData->outputFilterAllowWildFlags, 0, sizeof(int) * wrapperData->outputFilterCount);
+
+        wrapperData->outputFilterMinLens = malloc(sizeof(size_t) * wrapperData->outputFilterCount);
+        if (!wrapperData->outputFilterMinLens) {
+            outOfMemory(TEXT("LC"), 5);
+            return TRUE;
+        }
+        memset(wrapperData->outputFilterMinLens, 0, sizeof(size_t) * wrapperData->outputFilterCount);
 
         i = 0;
         while (propertyNames[i]) {
@@ -5190,7 +7143,7 @@ int loadConfigurationTriggers() {
                 outOfMemory(TEXT("LC"), 3);
                 return TRUE;
             }
-            _tcscpy(wrapperData->outputFilters[i], prop);
+            _tcsncpy(wrapperData->outputFilters[i], prop, _tcslen(prop) + 1);
 
             /* Get the action */
             _sntprintf(propName, 256, TEXT("wrapper.filter.action.%lu"), propertyIndices[i]);
@@ -5201,6 +7154,14 @@ int loadConfigurationTriggers() {
             _sntprintf(propName, 256, TEXT("wrapper.filter.message.%lu"), propertyIndices[i]);
             prop = getStringProperty(properties, propName, NULL);
             wrapperData->outputFilterMessages[i] = (TCHAR *)prop;
+
+            /* Get the wildcard flags. */
+            _sntprintf(propName, 256, TEXT("wrapper.filter.allow_wildcards.%lu"), propertyIndices[i]);
+            wrapperData->outputFilterAllowWildFlags[i] = getBooleanProperty(properties, propName, FALSE);
+            if (wrapperData->outputFilterAllowWildFlags[i]) {
+                /* Calculate the minimum text length. */
+                wrapperData->outputFilterMinLens[i] = wrapperGetMinimumTextLengthForPattern(wrapperData->outputFilters[i]);
+            }
 
 #ifdef _DEBUG
             _tprintf(TEXT("filter #%lu, actions=("), propertyIndices[i]);
@@ -5225,7 +7186,7 @@ int loadConfigurationTriggers() {
             outOfMemory(TEXT("LC"), 4);
             return TRUE;
         }
-        _tcscpy(wrapperData->outputFilters[i], TRIGGER_ADVICE_NIL_SERVER);
+        _tcsncpy(wrapperData->outputFilters[i], TRIGGER_ADVICE_NIL_SERVER, _tcslen(TRIGGER_ADVICE_NIL_SERVER) + 1);
         wrapperData->outputFilterActionLists[i] = malloc(sizeof(int) * 2);
         if (!wrapperData->outputFilters[i]) {
             outOfMemory(TEXT("LC"), 5);
@@ -5234,6 +7195,8 @@ int loadConfigurationTriggers() {
         wrapperData->outputFilterActionLists[i][0] = ACTION_ADVICE_NIL_SERVER;
         wrapperData->outputFilterActionLists[i][1] = ACTION_LIST_END;
         wrapperData->outputFilterMessages[i] = NULL;
+        wrapperData->outputFilterAllowWildFlags[i] = FALSE;
+        wrapperData->outputFilterMinLens[i] = 0;
         i++;
 #endif
     }
@@ -5242,19 +7205,31 @@ int loadConfigurationTriggers() {
     return FALSE;
 }
 
+int getBackendTypeForName(const TCHAR *typeName) {
+    if (strcmpIgnoreCase(typeName, TEXT("SOCKET")) == 0) {
+        return WRAPPER_BACKEND_TYPE_SOCKET;
+    } else if (strcmpIgnoreCase(typeName, TEXT("PIPE")) == 0) {
+        return WRAPPER_BACKEND_TYPE_PIPE;
+    } else {
+        return WRAPPER_BACKEND_TYPE_UNKNOWN;
+    }
+}
+
 /**
  * Return FALSE if successful, TRUE if there were problems.
  */
 int loadConfiguration() {
-    const TCHAR* logfilePath;
-    int logfileRollMode;
     TCHAR propName[256];
     const TCHAR* val;
     int startupDelay;
-    
-    /* Load log file */
-    logfilePath = getFileSafeStringProperty(properties, TEXT("wrapper.logfile"), TEXT("wrapper.log"));
-    setLogfilePath(logfilePath);
+
+    wrapperLoadLoggingProperties(FALSE);
+
+    /* Decide on the backend type to use. */
+    wrapperData->backendType = getBackendTypeForName(getStringProperty(properties, TEXT("wrapper.backend.type"), TEXT("SOCKET")));
+    if (wrapperData->backendType == WRAPPER_BACKEND_TYPE_UNKNOWN) {
+        wrapperData->backendType = WRAPPER_BACKEND_TYPE_SOCKET;
+    }
 
     /* Decide whether the classpath should be passed via the environment. */
     wrapperData->environmentClasspath = getBooleanProperty(properties, TEXT("wrapper.java.classpath.use_environment"), FALSE);
@@ -5262,104 +7237,46 @@ int loadConfiguration() {
     /* Decide how sequence gaps should be handled before any other properties are loaded. */
     wrapperData->ignoreSequenceGaps = getBooleanProperty(properties, TEXT("wrapper.ignore_sequence_gaps"), FALSE);
 
-    logfileRollMode = getLogfileRollModeForName(getStringProperty(properties, TEXT("wrapper.logfile.rollmode"), TEXT("SIZE")));
-    if (logfileRollMode == ROLL_MODE_UNKNOWN) {
-        log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_WARN,
-            TEXT("wrapper.logfile.rollmode invalid.  Disabling log file rolling."));
-        logfileRollMode = ROLL_MODE_NONE;
-    } else if (logfileRollMode == ROLL_MODE_DATE) {
-        if (!_tcsstr(logfilePath, ROLL_MODE_DATE_TOKEN)) {
-            log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_WARN,
-                TEXT("wrapper.logfile must contain \"%s\" for a roll mode of DATE.  Disabling log file rolling."),
-                ROLL_MODE_DATE_TOKEN);
-            logfileRollMode = ROLL_MODE_NONE;
-        }
-    }
-    setLogfileRollMode(logfileRollMode);
-
-    /* Load log file format */
-    setLogfileFormat(getStringProperty(properties, TEXT("wrapper.logfile.format"), TEXT("LPTM")));
-
-    /* Load log file log level */
-    setLogfileLevel(getStringProperty(properties, TEXT("wrapper.logfile.loglevel"), TEXT("INFO")));
-
-    /* Load max log filesize log level */
-    setLogfileMaxFileSize(getStringProperty(properties, TEXT("wrapper.logfile.maxsize"), TEXT("0")));
-
-    /* Load log files level */
-    setLogfileMaxLogFiles(getIntProperty(properties, TEXT("wrapper.logfile.maxfiles"), 0));
-
-    /* Load log file purge pattern */
-    setLogfilePurgePattern(getFileSafeStringProperty(properties, TEXT("wrapper.logfile.purge.pattern"), TEXT("")));
-
-    /* Load log file purge sort */
-    setLogfilePurgeSortMode(wrapperFileGetSortMode(getStringProperty(properties, TEXT("wrapper.logfile.purge.sort"), TEXT("TIMES"))));
-
-    /* Get the memory output status. */
-    wrapperData->logfileInactivityTimeout = __max(getIntProperty(properties, TEXT("wrapper.logfile.inactivity.timeout"), 1), 0);
-    setLogfileAutoClose(wrapperData->logfileInactivityTimeout <= 0);
-
-    /* Load console format */
-    setConsoleLogFormat(getStringProperty(properties, TEXT("wrapper.console.format"), TEXT("PM")));
-
-    /* Load console log level */
-    setConsoleLogLevel(getStringProperty(properties, TEXT("wrapper.console.loglevel"), TEXT("INFO")));
-
-    /* Load the console flush flag. */
-    setConsoleFlush(getBooleanProperty(properties, TEXT("wrapper.console.flush"), FALSE));
-
-    /* Load the console loglevel targets. */
-    setConsoleFatalToStdErr(getBooleanProperty(properties, TEXT("wrapper.console.fatal_to_stderr"), TRUE));
-    setConsoleErrorToStdErr(getBooleanProperty(properties, TEXT("wrapper.console.error_to_stderr"), TRUE));
-    setConsoleWarnToStdErr(getBooleanProperty(properties, TEXT("wrapper.console.warn_to_stderr"), FALSE));
-
-    /* Load syslog log level */
-    setSyslogLevel(getStringProperty(properties, TEXT("wrapper.syslog.loglevel"), TEXT("NONE")));
-
-#ifndef WIN32
-    /* Load syslog facility */
-    setSyslogFacility(getStringProperty(properties, TEXT("wrapper.syslog.facility"), TEXT("USER")));
-#endif
-
-    /* Load syslog event source name */
-    setSyslogEventSourceName(getStringProperty(properties, TEXT("wrapper.syslog.ident"), getStringProperty(properties, TEXT("wrapper.name"), getStringProperty(properties, TEXT("wrapper.ntservice.name"), TEXT("wrapper")))));
-    
-    /* Register the syslog message file if syslog is enabled */
-    if (getSyslogLevelInt() < LEVEL_NONE) {
-        registerSyslogMessageFile();
-    }
-
+    /* Make sure that the configured log file directory is accessible. */
+    checkLogfileDir();
     /* To make configuration reloading work correctly with changes to the log file,
      *  it needs to be closed here. */
     closeLogfile();
 
+    /* Maintain the logger just in case we wrote any queued errors. */
+    maintainLogger();
+    /* Because the first call could cause errors as well, do it again to clear them out.
+     *  This is only a one-time thing on startup as we test the new logfile configuration. */
+    maintainLogger();
+
     /* Initialize some values not loaded */
     wrapperData->exitCode = 0;
 
+    updateStringValue(&wrapperData->portAddress, getStringProperty(properties, TEXT("wrapper.port.address"), NULL));
     /* Get the port. The int will wrap within the 0-65535 valid range, so no need to test the value. */
     wrapperData->port = getIntProperty(properties, TEXT("wrapper.port"), 0);
     wrapperData->portMin = getIntProperty(properties, TEXT("wrapper.port.min"), 32000);
     if ((wrapperData->portMin < 1) || (wrapperData->portMin > 65535)) {
         wrapperData->portMin = 32000;
         log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_WARN,
-            TEXT("wrapper.port.min must be in the range 1-65535.  Changing to %d."), wrapperData->portMin);
+            TEXT("%s must be in the range %d to %d.  Changing to %d."), TEXT("wrapper.port.min"), 1, 65535, wrapperData->portMin);
     }
     wrapperData->portMax = getIntProperty(properties, TEXT("wrapper.port.max"), 32999);
     if ((wrapperData->portMax < 1) || (wrapperData->portMax > 65535)) {
         wrapperData->portMax = __min(wrapperData->portMin + 999, 65535);
         log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_WARN,
-            TEXT("wrapper.port.min must be in the range 1-65535.  Changing to %d."), wrapperData->portMax);
+            TEXT("%s must be in the range %d to %d.  Changing to %d."), TEXT("wrapper.port.max"), 1, 65535, wrapperData->portMax);
     } else if (wrapperData->portMax < wrapperData->portMin) {
         wrapperData->portMax = __min(wrapperData->portMin + 999, 65535);
         log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_WARN,
-            TEXT("wrapper.port.max must be greater than or equal to wrapper.port.min.  Changing to %d."), wrapperData->portMax);
+            TEXT("%s must be greater than or equal to %s.  Changing to %d."), TEXT("wrapper.port.max"), TEXT("wrapper.port.min"), wrapperData->portMax);
     }
 
     /* Get the port for the JVM side of the socket. */
-    wrapperData->jvmPort = getIntProperty(properties, TEXT("wrapper.jvm.port"), 0);
+    wrapperData->jvmPort = getIntProperty(properties, TEXT("wrapper.jvm.port"), -1);
     if (wrapperData->jvmPort > 0) {
         if (wrapperData->jvmPort == wrapperData->port) {
-            wrapperData->jvmPort = 0;
+            wrapperData->jvmPort = -1;
             log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_WARN,
                 TEXT("wrapper.jvm.port must not equal wrapper.port.  Changing to the default."));
         }
@@ -5368,34 +7285,29 @@ int loadConfiguration() {
     if ((wrapperData->jvmPortMin < 1) || (wrapperData->jvmPortMin > 65535)) {
         wrapperData->jvmPortMin = 31000;
         log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_WARN,
-            TEXT("wrapper.jvm.port.min must be in the range 1-65535.  Changing to %d."), wrapperData->jvmPortMin);
+            TEXT("%s must be in the range %d to %d.  Changing to %d."), TEXT("wrapper.jvm.port.min"), 1, 65535, wrapperData->jvmPortMin);
     }
     wrapperData->jvmPortMax = getIntProperty(properties, TEXT("wrapper.jvm.port.max"), 31999);
     if ((wrapperData->jvmPortMax < 1) || (wrapperData->jvmPortMax > 65535)) {
         wrapperData->jvmPortMax = __min(wrapperData->jvmPortMin + 999, 65535);
         log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_WARN,
-            TEXT("wrapper.jvm.port.min must be in the range 1-65535.  Changing to %d."), wrapperData->jvmPortMax);
+            TEXT("%s must be in the range %d to %d.  Changing to %d."), TEXT("wrapper.jvm.port.max"), 1, 65535, wrapperData->jvmPortMax);
     } else if (wrapperData->jvmPortMax < wrapperData->jvmPortMin) {
         wrapperData->jvmPortMax = __min(wrapperData->jvmPortMin + 999, 65535);
         log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_WARN,
-            TEXT("wrapper.jvm.port.max must be greater than or equal to wrapper.jvm.port.min.  Changing to %d."), wrapperData->jvmPortMax);
+            TEXT("%s must be greater than or equal to %s.  Changing to %d."), TEXT("wrapper.jvm.port.max"), TEXT("wrapper.jvm.port.min"), wrapperData->jvmPortMax);
     }
 
-    /* Get the debug status (Property is deprecated but flag is still used) */
-    wrapperData->isDebugging = getBooleanProperty(properties, TEXT("wrapper.debug"), FALSE);
-    if (wrapperData->isDebugging) {
-        /* For backwards compatability */
-        setConsoleLogLevelInt(LEVEL_DEBUG);
-        setLogfileLevelInt(LEVEL_DEBUG);
-    } else {
-        if (getLowLogLevel() <= LEVEL_DEBUG) {
-            wrapperData->isDebugging = TRUE;
-        }
-    }
-
+    wrapperData->printJVMVersion = getBooleanProperty(properties, TEXT("wrapper.java.version.output"), FALSE);
     /* Get the wrapper command log level. */
     wrapperData->commandLogLevel = getLogLevelForName(
         getStringProperty(properties, TEXT("wrapper.java.command.loglevel"), TEXT("DEBUG")));
+    
+    /* Should we detach the JVM on startup. */
+    if (wrapperData->isConsole) {
+        wrapperData->detachStarted = getBooleanProperty(properties, TEXT("wrapper.jvm_detach_started"), FALSE);
+    }
+    
     /* Get the adviser status */
     wrapperData->isAdviserEnabled = getBooleanProperty(properties, TEXT("wrapper.adviser"), TRUE);
     /* The adviser is always enabled if debug is enabled. */
@@ -5407,10 +7319,40 @@ int loadConfiguration() {
     if (!wrapperData->configured) {
         wrapperData->useSystemTime = getBooleanProperty(properties, TEXT("wrapper.use_system_time"), FALSE);
     }
+    
+    if (!wrapperData->configured) {
+        wrapperData->logBufferGrowth = getBooleanProperty(properties, TEXT("wrapper.log_buffer_growth"), FALSE);
+        setLogBufferGrowth(wrapperData->logBufferGrowth);
+    }
+    
+#ifdef WIN32
+    /* Get the use javaio buffer size. */
+    if (!wrapperData->configured) {
+        wrapperData->javaIOBufferSize = getIntProperty(properties, TEXT("wrapper.javaio.buffer_size"), WRAPPER_JAVAIO_BUFFER_SIZE_DEFAULT);
+        if (wrapperData->javaIOBufferSize == WRAPPER_JAVAIO_BUFFER_SIZE_SYSTEM_DEFAULT) {
+            /* Ok. System default buffer size. */
+        } else if (wrapperData->javaIOBufferSize < WRAPPER_JAVAIO_BUFFER_SIZE_MIN) {
+            wrapperData->javaIOBufferSize = WRAPPER_JAVAIO_BUFFER_SIZE_MIN;
+            log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_WARN,
+                TEXT("%s must be in the range %d to %d or %d.  Changing to %d."), TEXT("wrapper.javaio.buffer_size"), WRAPPER_JAVAIO_BUFFER_SIZE_MIN, WRAPPER_JAVAIO_BUFFER_SIZE_MAX, WRAPPER_JAVAIO_BUFFER_SIZE_SYSTEM_DEFAULT, wrapperData->javaIOBufferSize);
+        } else if (wrapperData->javaIOBufferSize > WRAPPER_JAVAIO_BUFFER_SIZE_MAX) {
+            wrapperData->javaIOBufferSize = WRAPPER_JAVAIO_BUFFER_SIZE_MAX;
+            log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_WARN,
+                TEXT("%s must be in the range %d to %d or %d.  Changing to %d."), TEXT("wrapper.javaio.buffer_size"), WRAPPER_JAVAIO_BUFFER_SIZE_MIN, WRAPPER_JAVAIO_BUFFER_SIZE_MAX, WRAPPER_JAVAIO_BUFFER_SIZE_SYSTEM_DEFAULT, wrapperData->javaIOBufferSize);
+        }
+    }
+#endif
+    
+    /* Get the use javaio thread flag. */
+    if (!wrapperData->configured) {
+        wrapperData->useJavaIOThread = getBooleanProperty(properties, TEXT("wrapper.javaio.use_thread"), getBooleanProperty(properties, TEXT("wrapper.use_javaio_thread"), FALSE));
+    }
+    
     /* Decide whether or not a mutex should be used to protect the tick timer. */
     if (!wrapperData->configured) {
         wrapperData->useTickMutex = getBooleanProperty(properties, TEXT("wrapper.use_tick_mutex"), FALSE);
     }
+    
     /* Get the timer thresholds. Properties are in seconds, but internally we use ticks. */
     wrapperData->timerFastThreshold = getIntProperty(properties, TEXT("wrapper.timer_fast_threshold"), WRAPPER_TIMER_FAST_THRESHOLD * WRAPPER_TICK_MS / 1000) * 1000 / WRAPPER_TICK_MS;
     wrapperData->timerSlowThreshold = getIntProperty(properties, TEXT("wrapper.timer_slow_threshold"), WRAPPER_TIMER_SLOW_THRESHOLD * WRAPPER_TICK_MS / 1000) * 1000 / WRAPPER_TICK_MS;
@@ -5441,8 +7383,20 @@ int loadConfiguration() {
     wrapperData->isCPUOutputEnabled = getBooleanProperty(properties, TEXT("wrapper.cpu_output"), FALSE);
     wrapperData->cpuOutputInterval = getIntProperty(properties, TEXT("wrapper.cpu_output.interval"), 1);
 
+    /* Get the pageFault output status. */
+    if (!wrapperData->configured) {
+        wrapperData->isPageFaultOutputEnabled = getBooleanProperty(properties, TEXT("wrapper.pagefault_output"), FALSE);
+        wrapperData->pageFaultOutputInterval = getIntProperty(properties, TEXT("wrapper.pagefault_output.interval"), 1);
+    }
+    
+    /* Get the disable tests flag. */
+    wrapperData->isTestsDisabled = getBooleanProperty(properties, TEXT("wrapper.disable_tests"), FALSE);
+
     /* Get the shutdown hook status */
     wrapperData->isShutdownHookDisabled = getBooleanProperty(properties, TEXT("wrapper.disable_shutdown_hook"), FALSE);
+    
+    /* Get the forced shutdown flag status. */
+    wrapperData->isForcedShutdownDisabled = getBooleanProperty(properties, TEXT("wrapper.disable_forced_shutdown"), FALSE);
 
     /* Get the startup delay. */
     startupDelay = getIntProperty(properties, TEXT("wrapper.startup.delay"), 0);
@@ -5472,24 +7426,31 @@ int loadConfiguration() {
     wrapperData->cpuTimeout = getIntProperty(properties, TEXT("wrapper.cpu.timeout"), 10);
     wrapperData->startupTimeout = getIntProperty(properties, TEXT("wrapper.startup.timeout"), 30);
     wrapperData->pingTimeout = getIntProperty(properties, TEXT("wrapper.ping.timeout"), 30);
+    if (wrapperData->pingActionList) {
+        free(wrapperData->pingActionList);
+    }
+    wrapperData->pingActionList = wrapperGetActionListForNames(getStringProperty(properties, TEXT("wrapper.ping.timeout.action"), TEXT("RESTART")), TEXT("wrapper.ping.timeout.action"));
+    wrapperData->pingAlertThreshold = getIntProperty(properties, TEXT("wrapper.ping.alert.threshold"), __max(1, wrapperData->pingTimeout / 4));
+    wrapperData->pingAlertLogLevel = getLogLevelForName(getStringProperty(properties, TEXT("wrapper.ping.alert.loglevel"), TEXT("STATUS")));
     wrapperData->pingInterval = getIntProperty(properties, TEXT("wrapper.ping.interval"), 5);
     wrapperData->pingIntervalLogged = getIntProperty(properties, TEXT("wrapper.ping.interval.logged"), 1);
     wrapperData->shutdownTimeout = getIntProperty(properties, TEXT("wrapper.shutdown.timeout"), 30);
     wrapperData->jvmExitTimeout = getIntProperty(properties, TEXT("wrapper.jvm_exit.timeout"), 15);
     wrapperData->jvmCleanupTimeout = getIntProperty(properties, TEXT("wrapper.jvm_cleanup.timeout"), 10);
+    wrapperData->jvmTerminateTimeout = getIntProperty(properties, TEXT("wrapper.jvm_terminate.timeout"), 10);
 
     wrapperData->cpuTimeout = validateTimeout(TEXT("wrapper.cpu.timeout"), wrapperData->cpuTimeout);
     wrapperData->startupTimeout = validateTimeout(TEXT("wrapper.startup.timeout"), wrapperData->startupTimeout);
     wrapperData->pingTimeout = validateTimeout(TEXT("wrapper.ping.timeout"), wrapperData->pingTimeout);
     wrapperData->shutdownTimeout = validateTimeout(TEXT("wrapper.shutdown.timeout"), wrapperData->shutdownTimeout);
     wrapperData->jvmExitTimeout = validateTimeout(TEXT("wrapper.jvm_exit.timeout"), wrapperData->jvmExitTimeout);
-    wrapperData->jvmCleanupTimeout = validateTimeout(TEXT("wrapper.jvm_cleanup.timeout"), wrapperData->jvmCleanupTimeout);
+    wrapperData->jvmTerminateTimeout = validateTimeout(TEXT("wrapper.jvm_terminate.timeout"), wrapperData->jvmTerminateTimeout);
     wrapperData->jvmCleanupTimeout = validateTimeout(TEXT("wrapper.jvm_cleanup.timeout"), wrapperData->jvmCleanupTimeout);
 
     if (wrapperData->pingInterval < 1) {
         wrapperData->pingInterval = 1;
         log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_WARN,
-            TEXT("wrapper.ping.interval must be at least 1 second.  Changing to 1."));
+            TEXT("The value of %s must be at least %d second(s).  Changing to %d."), TEXT("wrapper.ping.interval"), 1, wrapperData->pingInterval);
     } else if (wrapperData->pingInterval > 3600) {
         wrapperData->pingInterval = 3600;
         log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_WARN,
@@ -5498,7 +7459,7 @@ int loadConfiguration() {
     if (wrapperData->pingIntervalLogged < 1) {
         wrapperData->pingIntervalLogged = 1;
         log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_WARN,
-            TEXT("wrapper.ping.interval.logged must be at least 1 second.  Changing to 1."));
+            TEXT("The value of %s must be at least %d second(s).  Changing to %d."), TEXT("wrapper.ping.interval.logged"), 1, wrapperData->pingIntervalLogged);
     } else if (wrapperData->pingIntervalLogged > 86400) {
         wrapperData->pingIntervalLogged = 86400;
         log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_WARN,
@@ -5509,6 +7470,15 @@ int loadConfiguration() {
         wrapperData->pingTimeout = wrapperData->pingInterval + 5;
         log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_WARN,
             TEXT("wrapper.ping.timeout must be at least 5 seconds longer than wrapper.ping.interval.  Changing to %d."), wrapperData->pingTimeout);
+    }
+    if (wrapperData->pingAlertThreshold <= 0) {
+        /* Ping Alerts disabled. */
+        wrapperData->pingAlertThreshold = 0;
+    } else if ((wrapperData->pingTimeout > 0) && (wrapperData->pingAlertThreshold > wrapperData->pingTimeout)) {
+        wrapperData->pingAlertThreshold = wrapperData->pingTimeout;
+        log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_WARN,
+            TEXT("wrapper.ping.alert.threshold must be less than or equal to the value of wrapper.ping.timeout (%d seconds).  Changing to %d."),
+            wrapperData->pingInterval, wrapperData->pingTimeout);
     }
     if (wrapperData->cpuTimeout > 0) {
         /* Make sure that the timeouts are all longer than the cpu timeout. */
@@ -5531,13 +7501,19 @@ int loadConfiguration() {
     wrapperData->maxFailedInvocations = getIntProperty(properties, TEXT("wrapper.max_failed_invocations"), 5);
     wrapperData->successfulInvocationTime = getIntProperty(properties, TEXT("wrapper.successful_invocation_time"), 300);
     if (wrapperData->maxFailedInvocations < 1) {
-        log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_ERROR,
-            TEXT("The value of wrapper.max_failed_invocations must not be smaller than 1.  Changing to 1."));
         wrapperData->maxFailedInvocations = 1;
+        log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_ERROR,
+            TEXT("The value of %s must be at least %d second(s).  Changing to %d."), TEXT("wrapper.max_failed_invocations"), 1, wrapperData->maxFailedInvocations);
     }
 
     /* TRUE if the JVM should be asked to dump its state when it fails to halt on request. */
     wrapperData->requestThreadDumpOnFailedJVMExit = getBooleanProperty(properties, TEXT("wrapper.request_thread_dump_on_failed_jvm_exit"), FALSE);
+    wrapperData->requestThreadDumpOnFailedJVMExitDelay = getIntProperty(properties, TEXT("wrapper.request_thread_dump_on_failed_jvm_exit.delay"), 5);
+    if (wrapperData->requestThreadDumpOnFailedJVMExitDelay < 1) {
+        wrapperData->requestThreadDumpOnFailedJVMExitDelay = 1;
+        log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_ERROR,
+            TEXT("The value of %s must be at least %d second(s).  Changing to %d."), TEXT("wrapper.request_thread_dump_on_failed_jvm_exit.delay"), 1, wrapperData->requestThreadDumpOnFailedJVMExitDelay);
+    }
 
     /* Load the output filters. */
     if (loadConfigurationTriggers()) {
@@ -5549,6 +7525,8 @@ int loadConfiguration() {
         updateStringValue(&wrapperData->pidFilename, getFileSafeStringProperty(properties, TEXT("wrapper.pidfile"), NULL));
         correctWindowsPath(wrapperData->pidFilename);
     }
+    wrapperData->pidFileStrict = getBooleanProperty(properties, TEXT("wrapper.pidfile.strict"), FALSE);
+    
     updateStringValue(&wrapperData->javaPidFilename, getFileSafeStringProperty(properties, TEXT("wrapper.java.pidfile"), NULL));
     correctWindowsPath(wrapperData->javaPidFilename);
 
@@ -5576,7 +7554,7 @@ int loadConfiguration() {
     wrapperData->commandFileTests = getBooleanProperty(properties, TEXT("wrapper.commandfile.enable_tests"), FALSE);
 
     /** Get the interval at which the command file will be polled. */
-    wrapperData->commandPollInterval = __min(__max(getIntProperty(properties, TEXT("wrapper.command.poll_interval"), 5), 1), 3600);
+    wrapperData->commandPollInterval = propIntMin(propIntMax(getIntProperty(properties, TEXT("wrapper.command.poll_interval"), 5), 1), 3600);
 
     /** Get the anchor file if any.  May be NULL */
     if (!wrapperData->configured) {
@@ -5585,19 +7563,7 @@ int loadConfiguration() {
     }
 
     /** Get the interval at which the anchor file will be polled. */
-    wrapperData->anchorPollInterval = __min(__max(getIntProperty(properties, TEXT("wrapper.anchor.poll_interval"), 5), 1), 3600);
-
-    /** Get the umask value for the various files. */
-    wrapperData->umask = getIntProperty(properties, TEXT("wrapper.umask"), 0022);
-    wrapperData->javaUmask = getIntProperty(properties, TEXT("wrapper.java.umask"), wrapperData->umask);
-    wrapperData->pidFileUmask = getIntProperty(properties, TEXT("wrapper.pidfile.umask"), wrapperData->umask);
-    wrapperData->lockFileUmask = getIntProperty(properties, TEXT("wrapper.lockfile.umask"), wrapperData->umask);
-    wrapperData->javaPidFileUmask = getIntProperty(properties, TEXT("wrapper.java.pidfile.umask"), wrapperData->umask);
-    wrapperData->javaIdFileUmask = getIntProperty(properties, TEXT("wrapper.java.idfile.umask"), wrapperData->umask);
-    wrapperData->statusFileUmask = getIntProperty(properties, TEXT("wrapper.statusfile.umask"), wrapperData->umask);
-    wrapperData->javaStatusFileUmask = getIntProperty(properties, TEXT("wrapper.java.statusfile.umask"), wrapperData->umask);
-    wrapperData->anchorFileUmask = getIntProperty(properties, TEXT("wrapper.anchorfile.umask"), wrapperData->umask);
-    setLogfileUmask(getIntProperty(properties, TEXT("wrapper.logfile.umask"), wrapperData->umask));
+    wrapperData->anchorPollInterval = propIntMin(propIntMax(getIntProperty(properties, TEXT("wrapper.anchor.poll_interval"), 5), 1), 3600);
 
     /** Flag controlling whether or not system signals should be ignored. */
     val = getStringProperty(properties, TEXT("wrapper.ignore_signals"), TEXT("FALSE"));
@@ -5627,16 +7593,19 @@ int loadConfiguration() {
     /* Pausable */
     wrapperData->pausable = getBooleanProperty(properties, TEXT("wrapper.pausable"), getBooleanProperty(properties, TEXT("wrapper.ntservice.pausable"), FALSE));
     wrapperData->pausableStopJVM = getBooleanProperty(properties, TEXT("wrapper.pausable.stop_jvm"), getBooleanProperty(properties, TEXT("wrapper.ntservice.pausable.stop_jvm"), TRUE));
+    if (!wrapperData->configured) {
+        wrapperData->initiallyPaused = getBooleanProperty(properties, TEXT("wrapper.pause_on_startup"), FALSE);
+    }
 
 #ifdef WIN32
-    wrapperData->ignoreUserLogoffs = getBooleanProperty( properties, TEXT("wrapper.ignore_user_logoffs"), FALSE );
+    wrapperData->ignoreUserLogoffs = getBooleanProperty(properties, TEXT("wrapper.ignore_user_logoffs"), FALSE);
 
     /* Configure the NT service information */
     if (wrapperBuildNTServiceInfo()) {
         return TRUE;
     }
 
-    if (wrapperData->requestThreadDumpOnFailedJVMExit || wrapperData->commandFilename || wrapperData->generateConsole) {
+    if (wrapperData->generateConsole) {
         if (!wrapperData->ntAllocConsole) {
             /* We need to allocate a console in order for the thread dumps to work
              *  when running as a service.  But the user did not request that a
@@ -5644,6 +7613,15 @@ int loadConfiguration() {
             wrapperData->ntAllocConsole = TRUE;
             wrapperData->ntHideWrapperConsole = TRUE;
         }
+    }
+ #ifdef WIN32
+    if ((!strcmpIgnoreCase(wrapperData->argCommand, TEXT("s")) || !strcmpIgnoreCase(wrapperData->argCommand, TEXT("-service")))
+        && (!wrapperData->ntAllocConsole || wrapperData->ntHideWrapperConsole)) {
+ #else
+    if (!wrapperData->isConsole) {
+ #endif
+        /* The console is not visible, so we shouldn't waste time logging to it. */
+        setConsoleLogLevelInt(LEVEL_NONE);
     }
 
 #else /* UNIX */
@@ -5653,6 +7631,12 @@ int loadConfiguration() {
     }
 
 #endif
+
+    if (_tcscmp(wrapperVersionRoot, getStringProperty(properties, TEXT("wrapper.script.version"), wrapperVersionRoot)) != 0) {
+        log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_WARN,
+            TEXT("The version of the script (%s) doesn't match the version of this Wrapper (%s). This might cause some problems"), 
+            getStringProperty(properties, TEXT("wrapper.script.version"), wrapperVersionRoot), wrapperVersionRoot);
+    }
 
     wrapperData->configured = TRUE;
 
@@ -5686,7 +7670,7 @@ int wrapperLockTickMutex() {
         return TRUE;
     }
 #endif
-    
+
     return FALSE;
 }
 
@@ -5953,13 +7937,19 @@ int wrapperTickAssertions() {
  * Sets the working directory of the Wrapper to the specified directory.
  *  The directory can be relative or absolute.
  * If there are any problems then a non-zero value will be returned.
+ *
+ * @param dir Directory to change to.
+ * @param logErrors TRUE if errors should be logged.
  */
-int wrapperSetWorkingDir(const TCHAR* dir) {
+int wrapperSetWorkingDir(const TCHAR* dir, int logErrors) {
     int showOutput = wrapperData->configured;
 
     if (_tchdir(dir)) {
-        log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_FATAL,
-            TEXT("Unable to set working directory to: %s (%s)"), dir, getLastErrorText());
+        if ( logErrors )
+        {
+            log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_FATAL,
+                TEXT("Unable to set working directory to: %s (%s)"), dir, getLastErrorText());
+        }
         return TRUE;
     }
 
@@ -5988,7 +7978,7 @@ void wrapperLogSignaled(int logLevel, TCHAR *msg) {
     }
     /* */
 
-    log_printf(wrapperData->jvmRestarts, logLevel, TEXT("%s"), msg);
+    log_printf(wrapperData->jvmRestarts, logLevel, msg);
 }
 
 void wrapperKeyRegistered(TCHAR *key) {
@@ -6011,15 +8001,6 @@ void wrapperKeyRegistered(TCHAR *key) {
             /* Send the low log level to the JVM so that it can control output via the log method. */
             _sntprintf(buffer, 11, TEXT("%d"), getLowLogLevel());
             wrapperProtocolFunction(WRAPPER_MSG_LOW_LOG_LEVEL, buffer);
-
-            /* Send the ping timeout to the JVM. */
-            if (wrapperData->pingTimeout >= WRAPPER_TIMEOUT_MAX) {
-                /* Timeout disabled */
-                _sntprintf(buffer, 11, TEXT("%d"), 0);
-            } else {
-                _sntprintf(buffer, 11, TEXT("%d"), wrapperData->pingTimeout);
-            }
-            wrapperProtocolFunction(WRAPPER_MSG_PING_TIMEOUT, buffer);
 
             /* Send the log file name. */
             sendLogFileName();
@@ -6058,20 +8039,162 @@ void wrapperKeyRegistered(TCHAR *key) {
         /* We got a key registration that we were not expecting.  Ignore it. */
         break;
     }
-
-
 }
 
-void wrapperPingResponded() {
+/**
+ * Called when a ping is first determined to be slower than the wrapper.ping.alert.threshold.
+ *  This will happen before it has actually been responded to.
+ */
+void wrapperPingSlow() {
+}
+
+/**
+ * Called when a ping is responded to, but was slower than the wrapper.ping.alert.threshold.
+ *
+ * @param tickAge The number of seconds it took to respond.
+ */
+void wrapperPingRespondedSlow(int tickAge) {
+    log_printf(WRAPPER_SOURCE_WRAPPER, wrapperData->pingAlertLogLevel, TEXT("Pinging the JVM took %d seconds to respond."), tickAge);
+}
+
+/**
+ * Called when a ping response is received.
+ *
+ * @param pingSendTicks Time in ticks when the ping was originally sent.
+ * @param queueWarnings TRUE if warnings about the queue should be logged, FALSE if the ping response did not contain a time.
+ */
+void wrapperPingResponded(TICKS pingSendTicks, int queueWarnings) {
+    TICKS nowTicks;
+    int tickAge;
+    PPendingPing pendingPing;
+    int pingSearchDone;
+    
+#ifdef DEBUG_PING_QUEUE
+    log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS, TEXT("    PING QUEUE Ping Response (tick %08x)"), pingSendTicks);
+#endif
+    /* We want to purge the ping from the PendingPing list. */
+    do {
+        pendingPing = wrapperData->firstPendingPing;
+        if (pendingPing != NULL) {
+            tickAge = wrapperGetTickAgeTicks(pingSendTicks, pendingPing->sentTicks);
+#ifdef DEBUG_PING_QUEUE
+            log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS, TEXT("    PING QUEUE First Queued Ping (tick %08x, age %d)"), pendingPing->sentTicks, tickAge);
+#endif
+            if (tickAge > 0) { /* pendingPing->sentTicks > pingSendTicks */
+                /* We received a ping response that is earlier than the one we were expecting.
+                 *  If the pendingPingQueue has overflown then we will stop writing to it.  Don't long warning messages when in this state as they would be confusing and are expected.
+                 *  Leave this one in the queue for later. */
+                if (queueWarnings) {
+                    if ((!wrapperData->pendingPingQueueOverflow) && (!wrapperData->pendingPingQueueOverflowEmptied)) {
+                        log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_ERROR, TEXT("Received an unexpected ping response, sent at tick %08x.  First expected ping was sent at tick %08x."), pingSendTicks, pendingPing->sentTicks);
+                    } else {
+#ifdef DEBUG_PING_QUEUE
+                        log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS, TEXT("    PING QUEUE Silently skipping unexpected ping response. (tick %08x) (First tick %08x)"), pingSendTicks, pendingPing->sentTicks);
+#endif
+                    }
+                }
+                pendingPing = NULL;
+                pingSearchDone = TRUE;
+            } else {
+                if (tickAge < 0) {
+                    /* This PendingPing object was sent before the PING that we received.  This means that we somehow lost a ping. */
+                    if (queueWarnings) {
+                        if ((!wrapperData->pendingPingQueueOverflow) && (!wrapperData->pendingPingQueueOverflowEmptied)) {
+                            log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_ERROR, TEXT("Lost a ping response, sent at tick %08x."), pendingPing->sentTicks);
+                        } else {
+#ifdef DEBUG_PING_QUEUE
+                            log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS, TEXT("    PING QUEUE Silently skipping lost ping response. (tick %08x)"), pendingPing->sentTicks);
+#endif
+                        }
+                    }
+                    pingSearchDone = FALSE;
+                } else {
+                    /* This PendingPing object is for this PING event. */
+                    pingSearchDone = TRUE;
+#ifdef DEBUG_PING_QUEUE
+                    log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS, TEXT("    PING QUEUE Expected Ping Response. (tick %08x)"), pendingPing->sentTicks);
+#endif
+                    
+                    /* When the emptied flag is set, we know that we are recovering from an overflow.
+                     *  That flag is reset on the first expected PendingPing found in the queue. */
+                    if (wrapperData->pendingPingQueueOverflowEmptied) {
+                        wrapperData->pendingPingQueueOverflowEmptied = FALSE;
+#ifdef DEBUG_PING_QUEUE
+                        log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS, TEXT("    PING QUEUE Emptied Set flag reset."));
+#endif
+                    }
+                }
+                
+                /* Detach the PendingPing from the queue. */
+                if (pendingPing->nextPendingPing != NULL) {
+                    /* This was the first PendingPing of several in the queue. */
+                    wrapperData->pendingPingCount--;
+                    if (wrapperData->firstUnwarnedPendingPing == wrapperData->firstPendingPing) {
+                        wrapperData->firstUnwarnedPendingPing = pendingPing->nextPendingPing;
+                    }
+                    wrapperData->firstPendingPing = pendingPing->nextPendingPing;
+                    pendingPing->nextPendingPing = NULL;
+#ifdef DEBUG_PING_QUEUE
+                    log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS, TEXT("--- PING QUEUE Size: %d"), wrapperData->pendingPingCount);
+#endif
+                } else {
+                    /* This was the only PendingPing in the queue. */
+                    wrapperData->pendingPingCount = 0;
+                    wrapperData->firstUnwarnedPendingPing = NULL;
+                    wrapperData->firstPendingPing = NULL;
+                    wrapperData->lastPendingPing = NULL;
+#ifdef DEBUG_PING_QUEUE
+                    log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS, TEXT("--- PING QUEUE Empty.") );
+#endif
+                    if (wrapperData->pendingPingQueueOverflow) {
+                        wrapperData->pendingPingQueueOverflowEmptied = TRUE;
+                        wrapperData->pendingPingQueueOverflow = FALSE;
+#ifdef DEBUG_PING_QUEUE
+                        log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS, TEXT("    PING QUEUE Reset Overflow, Emptied Set.") );
+#endif
+                    }
+                }
+                
+                /* Free up the pendingPing object. */
+                if (pendingPing != NULL) {
+                    free(pendingPing);
+                    pendingPing = NULL;
+                }
+            }
+        } else {
+            /* Got a ping response when the queue was empty. */
+            if (queueWarnings) {
+                if ((!wrapperData->pendingPingQueueOverflow) && (!wrapperData->pendingPingQueueOverflowEmptied)) {
+                    log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_ERROR, TEXT("Received an unexpected ping response, sent at tick %08x."), pingSendTicks);
+                } else {
+#ifdef DEBUG_PING_QUEUE
+                    log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS, TEXT("    PING QUEUE Silently skipping unexpected ping response. (tick %08x) (Empty)"), pingSendTicks);
+#endif
+                }
+            }
+            pingSearchDone = TRUE;
+        }
+    } while (!pingSearchDone);
+    
     /* Depending on the current JVM state, do something. */
     switch (wrapperData->jState) {
     case WRAPPER_JSTATE_STARTED:
-        /* We got a response to a ping.  Allow 5 + <pingTimeout> more seconds before the JVM
-         *  is considered to be dead. */
+        /* We got a response to a ping. */
+        nowTicks = wrapperGetTicks();
+        
+        /* Figure out how long it took for us to get this ping response in seconds. */
+        tickAge = wrapperGetTickAgeSeconds(pingSendTicks, nowTicks);
+        
+        /* If we took longer than the threshold then we want to log a message. */
+        if ((wrapperData->pingAlertThreshold > 0) && (tickAge >= wrapperData->pingAlertThreshold)) {
+            wrapperPingRespondedSlow(tickAge);
+        }
+        
+        /* Allow 5 + <pingTimeout> more seconds before the JVM is considered to be dead. */
         if (wrapperData->pingTimeout > 0) {
-            wrapperUpdateJavaStateTimeout(wrapperGetTicks(), 5 + wrapperData->pingTimeout);
+            wrapperUpdateJavaStateTimeout(nowTicks, 5 + wrapperData->pingTimeout);
         } else {
-            wrapperUpdateJavaStateTimeout(wrapperGetTicks(), -1);
+            wrapperUpdateJavaStateTimeout(nowTicks, -1);
         }
 
         break;
@@ -6082,6 +8205,11 @@ void wrapperPingResponded() {
     }
 }
 
+void wrapperPingTimeoutResponded() {
+    wrapperProcessActionList(wrapperData->pingActionList, TEXT("JVM appears hung: Timed out waiting for signal from JVM."),
+                             WRAPPER_ACTION_SOURCE_CODE_PING_TIMEOUT, TRUE, 1);
+}
+
 void wrapperStopRequested(int exitCode) {
     if (wrapperData->isDebugging) {
         log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_DEBUG,
@@ -6090,11 +8218,15 @@ void wrapperStopRequested(int exitCode) {
 
     /* Get things stopping on this end.  Ask the JVM to stop again in case the
      *  user code on the Java side is not written correctly. */
-    wrapperStopProcess(exitCode);
+    wrapperStopProcess(exitCode, FALSE);
 }
 
 void wrapperRestartRequested() {
     log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS, TEXT("JVM requested a restart."));
+    
+    /* Make a note of the fact that we received this restart packet. */
+    wrapperData->restartPacketReceived = TRUE;
+    
     wrapperRestartProcess();
 }
 
@@ -6133,13 +8265,34 @@ void wrapperStoppedSignaled() {
     if (wrapperData->isDebugging) {
         log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_DEBUG, TEXT("JVM signaled that it was stopped."));
     }
+    
+    /* If the restart mode is already set and it is WRAPPER_RESTART_REQUESTED_AUTOMATIC but we
+     *  have not yet received a RESTART packet, this means that state engine got confused because
+     *  of an unexpected delay.  The fact that the STOPPED packet arived but not the RESTART packet
+     *  means that the application did not intend for the restart to take place.
+     * Reset the restart and let the Wrapper exit. */
+    if ((wrapperData->restartRequested == WRAPPER_RESTART_REQUESTED_AUTOMATIC) && (!wrapperData->restartPacketReceived)) {
+        /* If we get here it is because the Wrapper previously decided to do a restart to recover.
+         *  That means that another message was already shown to the user.  We want to show another
+         *  message here so there is a record of why we don't restart. */
+        log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS, TEXT("Received Stopped packet late.  Cancel automatic restart."));
+        
+        wrapperData->restartRequested = WRAPPER_RESTART_REQUESTED_NO;
+    }
+    
+    /* Make a note of the fact that we received this stopped packet. */
+    wrapperData->stoppedPacketReceived = TRUE;
 
-    /* The Java side of the wrapper signaled that it stopped
-     *  allow 5 + jvmExitTimeout seconds for the JVM to exit. */
-    if (wrapperData->jvmExitTimeout > 0) {
-        wrapperSetJavaState(WRAPPER_JSTATE_STOPPED, wrapperGetTicks(), 5 + wrapperData->jvmExitTimeout);
-    } else {
-        wrapperSetJavaState(WRAPPER_JSTATE_STOPPED, 0, -1);
+    if ((wrapperData->jState == WRAPPER_JSTATE_STARTING) ||
+        (wrapperData->jState == WRAPPER_JSTATE_STARTED) ||
+        (wrapperData->jState == WRAPPER_JSTATE_STOPPING)) {
+        /* The Java side of the wrapper signaled that it stopped
+         *  allow 5 + jvmExitTimeout seconds for the JVM to exit. */
+        if (wrapperData->jvmExitTimeout > 0) {
+            wrapperSetJavaState(WRAPPER_JSTATE_STOPPED, wrapperGetTicks(), 5 + wrapperData->jvmExitTimeout);
+        } else {
+            wrapperSetJavaState(WRAPPER_JSTATE_STOPPED, 0, -1);
+        }
     }
 }
 
@@ -6180,7 +8333,7 @@ void wrapperStartedSignaled() {
 
 
     if (wrapperData->jState == WRAPPER_JSTATE_STARTING) {
-        /* We got a response to a ping.  Allow 5 + <pingTimeout> more seconds before the JVM
+        /* We got the expected started packed.  Now start pinging.  Allow 5 + <pingTimeout> more seconds before the JVM
          *  is considered to be dead. */
         if (wrapperData->pingTimeout > 0) {
             wrapperSetJavaState(WRAPPER_JSTATE_STARTED, wrapperGetTicks(), 5 + wrapperData->pingTimeout);
@@ -6194,9 +8347,17 @@ void wrapperStartedSignaled() {
             if (!wrapperData->isConsole) {
                 /* Tell the service manager that we started */
                 wrapperReportStatus(FALSE, WRAPPER_WSTATE_STARTED, 0, 0);
-
             }
         }
+        
+        /* If we are configured to detach and shutdown when the JVM is started then start doing so. */
+        if (wrapperData->detachStarted) {
+            log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS, TEXT("JVM launched and detached.  Wrapper Shutting down..."));
+            wrapperProtocolClose();
+            wrapperDetachJava();
+            wrapperStopProcess(0, FALSE);
+        }
+        
     } else if (wrapperData->jState == WRAPPER_JSTATE_STOP) {
         /* This will happen if the Wrapper was asked to stop as the JVM is being launched. */
     } else if (wrapperData->jState == WRAPPER_JSTATE_STOPPING) {
@@ -6204,3 +8365,166 @@ void wrapperStartedSignaled() {
         wrapperSetJavaState(WRAPPER_JSTATE_STOP, 0, -1);
     }
 }
+
+#ifdef CUNIT
+static void subTestJavaAdditionalParamSuite(int stripQuote, TCHAR *config, TCHAR **strings, int strings_len, int isJVMParam) {
+    LoadParameterFileCallbackParam param;
+    int ret;
+    int i;
+
+    param.stripQuote = stripQuote;
+    param.strings = NULL;
+    param.index = 0;
+    param.isJVMParam = isJVMParam;
+    ret = loadParameterFileCallback((void *)(&param), NULL, 0, config, FALSE);
+    CU_ASSERT_TRUE(ret);
+    CU_ASSERT(strings_len == param.index);
+
+    param.stripQuote = stripQuote;
+    param.strings = (TCHAR **)malloc(sizeof(TCHAR *) * strings_len);
+    param.index = 0;
+    param.isJVMParam = isJVMParam;
+    CU_ASSERT(param.strings != NULL);
+
+    ret = loadParameterFileCallback((void *)(&param), NULL, 0, config, FALSE);
+    CU_ASSERT_TRUE(ret);
+    CU_ASSERT(strings_len == param.index);
+
+    for (i = 0; i < strings_len; i++) {
+        CU_ASSERT(_tcscmp(strings[i], param.strings[i]) == 0);
+    }
+}
+
+#define ARRAY_LENGTH(a) (sizeof(a) / sizeof(a[0]))
+
+void testJavaAdditionalParamSuite(void) {
+    int stripQuote;
+    int i = 0;
+    int isJVM = TRUE;
+    for (i = 0; i < 2; i++) {
+        _tprintf(TEXT("%d round\n"), i);
+        if (i > 0) {
+            isJVM = FALSE;
+        }
+        /* Test set #1 */
+        {
+            /* Single parameter in 1 line. */
+            TCHAR *config = TEXT("-Dsomething=something");
+            TCHAR *strings[1];
+            strings[0] = TEXT("-Dsomething=something");
+            subTestJavaAdditionalParamSuite(FALSE, config, strings, ARRAY_LENGTH(strings), isJVM);
+        }
+        {
+            /* Multiple parameters in 1 line. */
+            TCHAR *config = TEXT("-Dsomething=something -Dxxx=xxx");
+            TCHAR *strings[2];
+            strings[0] = TEXT("-Dsomething=something");
+            strings[1] = TEXT("-Dxxx=xxx");
+            subTestJavaAdditionalParamSuite(FALSE, config, strings, ARRAY_LENGTH(strings), isJVM);
+        }
+        {
+            /* Horizontal Tab is not a delimiter. */
+            TCHAR *config = TEXT("-Dsomething1=something1\t-Dsomething2=something2 -Dxxx=xxx");
+            TCHAR *strings[2];
+            strings[0] = TEXT("-Dsomething1=something1\t-Dsomething2=something2");
+            strings[1] = TEXT("-Dxxx=xxx");
+            subTestJavaAdditionalParamSuite(FALSE, config, strings, ARRAY_LENGTH(strings), isJVM);
+        }
+        {
+            /* Horizontal Tab is not a delimiter. */
+            TCHAR *config = TEXT("-Dsomething1=something1\t-Dsomething2=something2 -Dxxx=xxx");
+            TCHAR *strings[2];
+            strings[0] = TEXT("-Dsomething1=something1\t-Dsomething2=something2");
+            strings[1] = TEXT("-Dxxx=xxx");
+            subTestJavaAdditionalParamSuite(FALSE, config, strings, ARRAY_LENGTH(strings), isJVM);
+        }
+        if (isJVM == TRUE) {
+            {
+                /* A parameter without heading '-' will be skipped. */
+                TCHAR *config = TEXT("something=something -Dxxx=xxx");
+                TCHAR *strings[1];
+                strings[0] = TEXT("-Dxxx=xxx");
+                subTestJavaAdditionalParamSuite(FALSE, config, strings, ARRAY_LENGTH(strings), isJVM);
+            }
+        } else {
+            {
+            /* A parameter without heading '-' will not be skipped. */
+            TCHAR *config = TEXT("something=something -Dxxx=xxx");
+            TCHAR *strings[2];
+            strings[0] = TEXT("something=something");
+            strings[1] = TEXT("-Dxxx=xxx");
+            subTestJavaAdditionalParamSuite(FALSE, config, strings, ARRAY_LENGTH(strings), isJVM);
+            }
+        }
+
+        /* Test set #2 : without stripping double quotations */
+        stripQuote = FALSE;    
+        {
+            /* Quotations #1 */
+            TCHAR *config = TEXT("-DmyApp.x1=\"Hello World.\" -DmyApp.x2=x2");
+            TCHAR *strings[2];
+            strings[0] = TEXT("-DmyApp.x1=\"Hello World.\"");
+            strings[1] = TEXT("-DmyApp.x2=x2");
+            subTestJavaAdditionalParamSuite(stripQuote, config, strings, ARRAY_LENGTH(strings), isJVM);
+        }
+        {
+            /* Quotations #2 */
+            TCHAR *config = TEXT("\"-DmyApp.x1=Hello World.\" -DmyApp.x2=x2");
+            TCHAR *strings[2];
+            strings[0] = TEXT("\"-DmyApp.x1=Hello World.\"");
+            strings[1] = TEXT("-DmyApp.x2=x2");
+            subTestJavaAdditionalParamSuite(stripQuote, config, strings, ARRAY_LENGTH(strings), isJVM);
+        }
+        {
+            /* Escaped quotation */
+            TCHAR *config = TEXT("-DmyApp.x1=\"Hello \\\"World.\" -DmyApp.x2=x2");
+            TCHAR *strings[2];
+            strings[0] = TEXT("-DmyApp.x1=\"Hello \\\"World.\"");
+            strings[1] = TEXT("-DmyApp.x2=x2");
+            subTestJavaAdditionalParamSuite(stripQuote, config, strings, ARRAY_LENGTH(strings), isJVM);
+        }
+        {
+            /* Escaped backslash */
+            TCHAR *config = TEXT("-DmyApp.x1=\"Hello World.\\\\\" -DmyApp.x2=x2");
+            TCHAR *strings[2];
+            strings[0] = TEXT("-DmyApp.x1=\"Hello World.\\\\\"");
+            strings[1] = TEXT("-DmyApp.x2=x2");
+            subTestJavaAdditionalParamSuite(stripQuote, config, strings, ARRAY_LENGTH(strings), isJVM);
+        }
+        /* Test set #3 : with stripping double quotations */
+        stripQuote = TRUE;
+        {
+            /* Quotations #1 */
+            TCHAR *config = TEXT("-DmyApp.x1=\"Hello World.\" -DmyApp.x2=x2");
+            TCHAR *strings[2];
+            strings[0] = TEXT("-DmyApp.x1=Hello World.");
+            strings[1] = TEXT("-DmyApp.x2=x2");
+            subTestJavaAdditionalParamSuite(stripQuote, config, strings, ARRAY_LENGTH(strings), isJVM);
+        }
+        {
+            /* Quotations #2 */
+            TCHAR *config = TEXT("\"-DmyApp.x1=Hello World.\" -DmyApp.x2=x2");
+            TCHAR *strings[2];
+            strings[0] = TEXT("-DmyApp.x1=Hello World.");
+            strings[1] = TEXT("-DmyApp.x2=x2");
+            subTestJavaAdditionalParamSuite(stripQuote, config, strings, ARRAY_LENGTH(strings), isJVM);
+        }
+        {
+            /* Escaped quotation */
+            TCHAR *config = TEXT("-DmyApp.x1=\"Hello \\\"World.\" -DmyApp.x2=x2");
+            TCHAR *strings[2];
+            strings[0] = TEXT("-DmyApp.x1=Hello \"World.");
+            strings[1] = TEXT("-DmyApp.x2=x2");  
+            subTestJavaAdditionalParamSuite(stripQuote, config, strings, ARRAY_LENGTH(strings), isJVM);
+        }
+        {
+            /* Escaped backslash */
+            TCHAR *config = TEXT("-DmyApp.x1=\"Hello World.\\\\\" -DmyApp.x2=x2");
+            TCHAR *strings[2];
+            strings[0] = TEXT("-DmyApp.x1=Hello World.\\");
+            strings[1] = TEXT("-DmyApp.x2=x2");
+            subTestJavaAdditionalParamSuite(stripQuote, config, strings, ARRAY_LENGTH(strings), isJVM);
+        }
+    }
+}
+#endif /* CUNIT */

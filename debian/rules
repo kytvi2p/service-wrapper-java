@@ -1,119 +1,62 @@
 #!/usr/bin/make -f
+# -*- makefile -*-
+# Sample debian/rules that uses debhelper.
+# This file was originally written by Joey Hess and Craig Small.
+# As a special exception, when this file is copied by dh-make into a
+# dh-make output file, you may use that output file without restriction.
+# This special exception was added by Craig Small in version 0.37 of dh-make.
 
-DH_VERBOSE=1
-DEB_HOST_ARCH     := $(shell dpkg-architecture -qDEB_HOST_ARCH)
-DEB_HOST_ARCH_CPU := $(shell dpkg-architecture -qDEB_HOST_ARCH_CPU)
-CLASSPATH         := /usr/share/java/junit4.jar:/usr/share/java/junit.jar:/usr/share/java/commons-collections.jar
-JAVA_HOME         := /usr/lib/jvm/default-java
-export CLASSPATH
-export JAVA_HOME
+# Uncomment this to turn on verbose mode.
+#export DH_VERBOSE=1
 
-#DEB_DESTDIR=debian/acgvision-agent
+export CLASSPATH="/usr/share/java/junit4.jar:/usr/share/java/junit.jar:/usr/share/java/commons-collections.jar"
+export DEB_HOST_ARCH := $(shell dpkg-architecture -qDEB_HOST_ARCH)
+export DEB_HOST_ARCH_CPU := $(shell dpkg-architecture -qDEB_HOST_ARCH_CPU)
 
-build: build-arch-stamp build-indep-stamp
-	dh_testdir
-	if test i386 = $(DEB_HOST_ARCH_CPU); then \
-                make -f Makefile-linux-x86-32.make -C src/c; fi
-	if test amd64 = $(DEB_HOST_ARCH_CPU); then \
-                make -f Makefile-linux-x86-64.make -C src/c; fi
-	if test ia64 = $(DEB_HOST_ARCH_CPU); then \
-                make -f Makefile-linux-ia-64.make -C src/c; fi
-	if test powerpc = $(DEB_HOST_ARCH_CPU); then \
-                make -f Makefile-linux-ppc-32.make -C src/c; fi
-	jh_build
+export JAVA_HOME=/usr/lib/jvm/default-java
+export DEB_BUILD_HARDENING=1
+#build:
+#	@echo 'The build target is disabled. Use the appropriate binary target.'
 
-build-arch: build-arch-stamp
-build-arch-stamp:
-	dh_testdir
-	if test i386 = $(DEB_HOST_ARCH_CPU); then \
-                make -f Makefile-linux-x86-32.make -C src/c; fi
-	if test amd64 = $(DEB_HOST_ARCH_CPU); then \
-                make -f Makefile-linux-x86-64.make -C src/c; fi
-	if test ia64 = $(DEB_HOST_ARCH_CPU); then \
-                make -f Makefile-linux-ia-64.make -C src/c; fi
-	if test powerpc = $(DEB_HOST_ARCH_CPU); then \
-                make -f Makefile-linux-ppc-32.make -C src/c; fi
-	BUILD_DIR=lib /bin/sh $(CURDIR)/debian/build-wrapper-scripts /usr/share/wrapper/daemon.sh /usr/sbin/wrapper
-	touch $@
+%:
+	dh $@  --with javahelper
 
-build-indep: build-indep-stamp
-build-indep-stamp:
-	dh_testdir
-	# Build the package
-	jh_build
-	touch $@
+# Quoting Policy version 3.9.2.0, 2011-04-07 section 4.9:
 
-clean:
-	dh_testdir
-	dh_testroot
+# /start quote
+# For some packages, notably ones where the same source tree is compiled in
+# different ways to produce two binary packages, the build target does not make
+# much sense. For these packages it is good enough to provide two (or more)
+# targets (build-a and build-b or whatever) for each of the ways of building the
+# package, and a build target that does nothing. The binary target will have to
+# build the package in each of the possible ways and make the binary package out
+# of each.
+# ...
+# When a package has a configuration and build routine which takes a long time,
+# or when the makefiles are poorly designed, or when build needs to run clean
+# first, it is a good idea to touch build when the build process is complete.
+# This will ensure that if debian/rules build is run again it will not rebuild
+# the whole program.
+# /end quote
+
+# Since that fits building the service-wrapper, we override the build target.
+#
+
+
+override_dh_auto_clean:
+	-ant -f build.xml -Dbits=$$(dpkg-architecture -qDEB_HOST_ARCH_BITS) total-clean
 	jh_build --clean
-	rm -f lib/*.jar
-	rm -f lib/*.so
-	rm -f lib/*.sh
-	rm -f src/c/*.o
-	rm -f bin/wrapper
-	dh_clean
+	rm -f bin/* build/* conf/* lib/* logs/* test/* src/c/*.o src/c/wrapperinfo.c
 
-install-indep: build-indep
+override_dh_auto_build:
 	dh_testdir
-	dh_testroot
-	dh_prep -k
-	dh_installdirs
+	jh_build
+	ant -f build.xml -Dbits=$$(dpkg-architecture -qDEB_HOST_ARCH_BITS) compile-c-unix
 
-binary-arch: build-arch
-	# Create the package here
-	dh_testdir
-	dh_testroot
-	dh_prep -k
-	dh_install -a
-	#jh_installlibs wrapper.jar -plibservice-wrapper-java
-	dh_installdocs -a
-	dh_installchangelogs -a
-	dh_installman debian/wrapper.1
-	#jh_depends
-	dh_link -a
-	dh_strip -a
-	#Depends
-	dh_shlibdeps -a
-	#Compress
-	dh_compress -a
-	dh_fixperms -a
-	dh_installdeb -a
-	dh_gencontrol -a
-	dh_md5sums -a
-	dh_builddeb -a
+override_dh_installchangelogs:
+	dh_installchangelogs doc/revisions.txt
 
+override_dh_installdocs:
+	dh_installdocs -p libservice-wrapper-java -p libservice-wrapper-jni --link-doc=service-wrapper
+	dh_installdocs --remaining-packages
 
-binary-indep: build-indep install-indep
-	# Create the package here
-	dh_testdir
-	dh_testroot -i
-	dh_prep -k
-	dh_install -i
-	jh_installlibs wrapper.jar -plibservice-wrapper-java
-	dh_installdocs -i
-	dh_installchangelogs -i
-	jh_depends -i
-	dh_link -i
-	dh_strip -i
-	#Depends
-	dh_shlibdeps -i
-	#Compress
-	dh_compress -i
-	dh_fixperms -i
-	dh_installdeb -i
-	dh_gencontrol -i
-	dh_md5sums -i
-	dh_builddeb -i
-
-
-post-clean:
-	jh_build --clean
-	rm -f lib/*.jar
-	rm -f lib/*.so
-	rm -f src/c/*.o
-	rm -f bin/wrapper
-	dh_clean
-
-binary: binary-indep binary-arch
-.PHONY: build build-arch build-indep clean binary-indep binary-arch binary install-indep  post-clean

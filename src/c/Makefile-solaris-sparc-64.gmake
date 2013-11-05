@@ -1,4 +1,4 @@
-# Copyright (c) 1999, 2010 Tanuki Software, Ltd.
+# Copyright (c) 1999, 2013 Tanuki Software, Ltd.
 # http://www.tanukisoftware.com
 # All rights reserved.
 #
@@ -7,13 +7,13 @@
 # license agreement you entered into with Tanuki Software.
 # http://wrapper.tanukisoftware.com/doc/english/licenseOverview.html
 
-COMPILE = /opt/studio12/SUNWspro/bin/cc -m64 -Kpic -O -DSOLARIS -DJSW64 -DUNICODE -D_UNICODE
+COMPILE = /opt/studio12/SUNWspro/bin/cc -m64 -mt -Kpic -O -DSOLARIS -DJSW64 -D_REENTRANT -DUNICODE -D_UNICODE
 
 INCLUDE=$(JAVA_HOME)/include
 
 DEFS = -I$(INCLUDE) -I$(INCLUDE)/solaris
 
-wrapper_SOURCE = wrapper.c wrapperinfo.c wrappereventloop.c wrapper_unix.c property.c logger.c wrapper_file.c wrapper_i18n.c
+wrapper_SOURCE = wrapper.c wrapperinfo.c wrappereventloop.c wrapper_unix.c property.c logger.c wrapper_file.c wrapper_i18n.c wrapper_hashmap.c
 
 libwrapper_so_OBJECTS = wrapper_i18n.o wrapperjni_unix.o wrapperinfo.o wrapperjni.o
 

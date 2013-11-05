@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999, 2010 Tanuki Software, Ltd.
+ * Copyright (c) 1999, 2013 Tanuki Software, Ltd.
  * http://www.tanukisoftware.com
  * All rights reserved.
  *
@@ -36,6 +36,9 @@
 #ifndef _LOGGER_H
 #define _LOGGER_H
 
+/* If defined, output debug information about console output. */
+/*#define DEBUG_CONSOLE_OUTPUT*/
+
 #ifdef MACOSX
  #ifndef wcscasecmp
 extern inline int wcscasecmp(const wchar_t* s1, const wchar_t* s2);
@@ -69,7 +72,9 @@ extern inline int wcscasecmp(const wchar_t* s1, const wchar_t* s2);
 #define WRAPPER_THREAD_MAIN     1
 #define WRAPPER_THREAD_SRVMAIN  2
 #define WRAPPER_THREAD_TIMER    3
-#define WRAPPER_THREAD_COUNT    4
+#define WRAPPER_THREAD_JAVAIO   4
+#define WRAPPER_THREAD_STARTUP  5
+#define WRAPPER_THREAD_COUNT    6
 
 #define MAX_LOG_SIZE 4096
 
@@ -80,6 +85,10 @@ extern inline int wcscasecmp(const wchar_t* s1, const wchar_t* s2);
 #define LOG_FORK_MARKER TEXT("#!#WrApPeR#!#")
 #define LOG_SPECIAL_MARKER TEXT("#!#WrApPeRsPeCiAl#!#")
 #endif
+
+/* Default log formats */
+#define LOG_FORMAT_LOGFILE_DEFAULT TEXT("LPTM")
+#define LOG_FORMAT_CONSOLE_DEFAULT TEXT("PM")
 
 /* * * Log level constants * * */
 
@@ -126,10 +135,6 @@ extern inline int wcscasecmp(const wchar_t* s1, const wchar_t* s2);
 #define ROLL_MODE_DATE_TOKEN      TEXT("YYYYMMDD")
 
 
-#ifdef WIN32
-extern void setConsoleStdoutHandle(HANDLE stdoutHandle);
-#endif
-
 /* * * Function predeclaration * * */
 #define strcmpIgnoreCase(str1, str2) _tcsicmp(str1, str2)
 
@@ -141,12 +146,104 @@ extern void outOfMemoryQueued(const TCHAR *context, int id);
 
 extern void outOfMemory(const TCHAR *context, int id);
 
+#ifdef _DEBUG
+/**
+ * Used to dump memory directly to the log file in both HEX and readable format.
+ *  Useful in debugging applications to track down memory overflows etc.
+ *
+ * @param label A label that will be prepended on all lines of output.
+ * @param memory The memory to be dumped.
+ * @param len The length of the memory to be dumped.
+ */
+extern void log_dumpHex(TCHAR *label, TCHAR *memory, size_t len);
+#endif
+
+/**
+ * Sets the number of milliseconds to allow logging to take before a warning is logged.
+ *  Defaults to 0 for no limit.  Possible values 0 to 3600000.
+ *
+ * @param threshold Warning threashold.
+ */
+extern void setLogWarningThreshold(int threshold);
+
+/**
+ * Sets the log levels to a silence so we never output anything.
+ */
+extern void setSilentLogLevels();
+
+/**
+ * Sets the console log levels to a simple format for help and usage messages.
+ */
 extern void setSimpleLogLevels();
+
+#ifdef WIN32
+/**
+ * This sets a flag which tells the logger that alternate source labels should be used to indicate that the current process is a launcher.
+ */
+extern void setLauncherSource();
+#endif
+
+/**
+ * Used for testing to set a pause into the next log entry made.
+ *
+ * @param pauseTime Number of seconds to pause, 0 pauses indefinitely.
+ */
+extern void setPauseTime(int pauseTime);
+
+/**
+ * Set to true to cause changes in internal buffer sizes to be logged.  Useful for debugging.
+ *
+ * @param log TRUE if changes should be logged.
+ */
+void setLogBufferGrowth(int log);
 
 /* * Logfile functions * */
 extern int isLogfileAccessed();
-extern void setLogfilePath( const TCHAR *log_file_path );
+
+/**
+ * Sets the log file to be used.  If the specified file is not absolute then
+ *  it will be resolved into an absolute path.  If there are any problems with
+ *  the path, like a directory not existing then the call will fail and the
+ *  cause will be written to the existing log.
+ *
+ * @param log_file_path Log file to start using.
+ * @param workingDir The current working directory, used for relative paths.
+ *                   This will be NULL if this is part of the bootstrap process,
+ *                   in which case we should not attempt to resolve the absolute
+ *                   path.
+ * @param preload TRUE if called as part of the preload process.  We use this to
+ *                suppress double warnings.
+ *
+ * @return TRUE if there were any problems.
+ */
+extern int setLogfilePath( const TCHAR *log_file_path, const TCHAR *workingDir, int preload);
+
+/**
+ * Returns the default logfile.
+ */
+extern const TCHAR *getDefaultLogfilePath();
+
+/**
+ * Returns a reference to the currect log file path.
+ *  This return value may be changed at any time if the log file is rolled.
+ */
 extern const TCHAR *getLogfilePath();
+
+/**
+ * Returns a snapshot of the current log file path.  This call safely gets the current path
+ *  and returns a copy.  It is the responsibility of the caller to free up the memory on
+ *  return.  Could return null if there was an error.
+ */
+extern TCHAR *getCurrentLogfilePath();
+
+/**
+ * Check the directory of the current logfile path to make sure it is writable.
+ *  If there are any problems, log a warning.
+ *
+ * @return TRUE if there were any problems.
+ */
+extern int checkLogfileDir();
+
 extern int getLogfileRollModeForName( const TCHAR *logfileRollName );
 extern void setLogfileRollMode(int log_file_roll_mode);
 extern int getLogfileRollMode();
@@ -161,8 +258,17 @@ extern void setLogfileMaxLogFiles(int max_log_files);
 extern void setLogfilePurgePattern(const TCHAR *pattern);
 extern void setLogfilePurgeSortMode(int sortMode);
 extern DWORD getLogfileActivity();
-extern void closeLogfile();
+
+/** Sets the auto flush log file flag. */
+extern void setLogfileAutoFlush(int autoFlush);
+
+/** Sets the auto close log file flag. */
 extern void setLogfileAutoClose(int autoClose);
+
+/** Closes the logfile if it is open. */
+extern void closeLogfile();
+
+/** Flushes any buffered logfile output to the disk. */
 extern void flushLogfile();
 
 /* * Console functions * */
@@ -171,6 +277,9 @@ extern void setConsoleLogLevelInt(int console_log_level);
 extern int getConsoleLogLevelInt();
 extern void setConsoleLogLevel( const TCHAR *console_log_level );
 extern void setConsoleFlush(int flush);
+#ifdef WIN32
+extern void setConsoleDirect(int direct);
+#endif
 extern void setConsoleFatalToStdErr(int toStdErr);
 extern void setConsoleErrorToStdErr(int toStdErr);
 extern void setConsoleWarnToStdErr(int toStdErr);
@@ -187,10 +296,12 @@ extern int registerSyslogMessageFile();
 extern int unregisterSyslogMessageFile();
 
 
+extern void resetDuration();
+
 extern int getLowLogLevel();
 
 /* * General log functions * */
-extern int initLogging();
+extern int initLogging(void (*logFileChanged)(const TCHAR *logFile));
 extern int disposeLogging();
 extern void setUptime(int uptime, int flipped);
 extern void rollLogs();

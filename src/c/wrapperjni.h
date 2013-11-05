@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999, 2010 Tanuki Software, Ltd.
+ * Copyright (c) 1999, 2013 Tanuki Software, Ltd.
  * http://www.tanukisoftware.com
  * All rights reserved.
  *
@@ -32,6 +32,8 @@
 
 #include "org_tanukisoftware_wrapper_WrapperManager.h"
 
+/*#define DEBUG_CHILD*/
+
 #ifndef TRUE
 #define TRUE -1
 #endif
@@ -48,37 +50,52 @@
 #define FALSE 0
 #endif
 
+#ifdef WIN32
+#define STDOUT_FILENO 1
+#define STDERR_FILENO 2
+#endif
+
 #define strcmpIgnoreCase(str1, str2) _tcsicmp(str1, str2)
+
+
+/** Flag to keep track of whether StdOut has been redirected. */
+extern int redirectedStdOut;
+
+/** Flag to keep track of whether StdErr has been redirected. */
+extern int redirectedStdErr;
 
 extern TCHAR* getLastErrorText();
 extern void throwJNIError(JNIEnv *env, const TCHAR *message);
+
+/* Special symbols that need to be defined manually as part of the bootstrap process. */
 extern const char utf8ClassJavaLangString[];
 extern const char utf8MethodInit[];
-extern const char utf8SigJ[];
-extern const char utf8VrV[];
+extern const char utf8Sig_BrV[];
+extern const char utf8Sigr_B[];
+extern const char utf8MethodGetBytes[];
 extern const char utf8ClassJavaLangOutOfMemoryError[];
+
+/* Symbols which need to be defined. */
+extern char *utf8SigLjavaLangStringrV;
 extern char *utf8ClassJavaLangSystem;
 extern char *utf8MethodGetProperties;
 extern char *utf8SigVrLjavaUtilProperties;
+extern char *utf8MethodGetProperty;
+extern char *utf8SigLjavaLangStringrLjavaLangString;
 
 #ifdef WIN32
 #else
+/* UNIX specific symbols. */
 extern char *utf8ClassOrgTanukisoftwareWrapperWrapperUNIXUser;
 extern char *utf8MethodSetGroup;
 extern char *utf8MethodAddGroup;
 extern char *utf8SigIIStringStringStringStringrV;
 extern char *utf8SigIStringrV;
-extern char *utf8ClassOrgTanukisoftwareWrapperWrapperProcess;
-extern char *utf8m_ptr;
-extern char* utf8SigBLJavaLangStringrV;
-extern char* utf8MethodSendCommand;
-extern char *utf8javaIOIOException;  /*java/io/IOException*/
-extern char* utf8ClassJavaLangError;
-extern char* utf8javaLangNullPointerException;
-extern char* utf8javalangIllegalArgumentException;
-extern char* utf8javalangUnsatisfiedLinkError;
-extern jstring JNU_NewStringFromNativeChar(JNIEnv *env, const char *str);
+#endif
 
+#ifdef WIN32
+#else
+extern jstring JNU_NewStringFromNativeChar(JNIEnv *env, const char *str);
 #endif
 
 extern void initCommon();
@@ -86,6 +103,7 @@ extern void initCommon();
 extern int getLastError();
 extern void throwOutOfMemoryError(JNIEnv *env, const TCHAR* locationCode);
 
+extern int wrapperSleep(int ms);
 extern int wrapperJNIDebugging;
 extern int wrapperLockControlEventQueue();
 extern int wrapperReleaseControlEventQueue();

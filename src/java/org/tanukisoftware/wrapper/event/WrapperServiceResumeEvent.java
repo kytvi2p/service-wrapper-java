@@ -1,7 +1,7 @@
 package org.tanukisoftware.wrapper.event;
 
 /*
- * Copyright (c) 1999, 2010 Tanuki Software, Ltd.
+ * Copyright (c) 1999, 2013 Tanuki Software, Ltd.
  * http://www.tanukisoftware.com
  * All rights reserved.
  *
@@ -36,11 +36,11 @@ public class WrapperServiceResumeEvent
     /**
      * Creates a new WrapperServiceResumeEvent.
      *
-     * @param sourceCode Source Code specifying where the resume action originated.
+     * @param actionSourceCode Source Code specifying where the resume action originated.
      */
-    public WrapperServiceResumeEvent( int sourceCode )
+    public WrapperServiceResumeEvent( int actionSourceCode )
     {
-        super( sourceCode );
+        super( actionSourceCode );
     }
     
     /*---------------------------------------------------------------
@@ -53,6 +53,6 @@ public class WrapperServiceResumeEvent
      */
     public String toString()
     {
-        return "WrapperServiceResumeEvent[sourceCode=" + getSourceCode() + "]";
+        return "WrapperServiceResumeEvent[actionSourceCode=" + getSourceCodeName() + "]";
     }
 }

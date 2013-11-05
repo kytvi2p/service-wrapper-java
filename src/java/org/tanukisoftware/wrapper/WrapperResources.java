@@ -1,7 +1,7 @@
 package org.tanukisoftware.wrapper;
 
 /*
- * Copyright (c) 1999, 2010 Tanuki Software, Ltd.
+ * Copyright (c) 1999, 2013 Tanuki Software, Ltd.
  * http://www.tanukisoftware.com
  * All rights reserved.
  *
@@ -39,7 +39,7 @@ public final class WrapperResources
     /**
      * WrapperResources instances are created using the WrapperManager.loadWrapperResources method.
      */
-    protected WrapperResources ()
+    protected WrapperResources()
     {
     }
     
@@ -51,12 +51,20 @@ public final class WrapperResources
     {
         try
         {
-            // close open files
-            nativeDestroyResource();
-        }
-        catch ( UnsatisfiedLinkError e )
-        {
-            // Ignore.  This will happen if there is no native library.
+            if ( WrapperManager.isLoggingFinalizers() )
+            {
+                // This can't be localized because of when it happens.
+                System.out.println( "WrapperResources.finalize Id=" + m_Id );
+            }
+            
+            if ( m_Id != 0 )
+            {
+                if ( WrapperManager.isNativeLibraryOk() )
+                {
+                    // clean up after the resource.
+                    nativeDestroyResource();
+                }
+            }
         }
         finally
         {
@@ -82,11 +90,11 @@ public final class WrapperResources
      */
     public String getString( String key )
     {
-        try
+        if ( ( m_Id != 0 ) && WrapperManager.isNativeLibraryOk() )
         {
             return nativeGetLocalizedString( key );
         }
-        catch ( UnsatisfiedLinkError e )
+        else
         {
             return key;
         }

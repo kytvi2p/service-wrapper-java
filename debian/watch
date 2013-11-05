@@ -1,4 +1,0 @@
-version=3
-opts="downloadurlmangle=s|/downloads/([\d\.]+)/$|/download/$1/wrapper_$1_src.tar.gz|,\
-filenamemangle=s|^.+?([\d\.]+).+$|wrapper_$1_src.tar.gz|" \
-     http://wrapper.tanukisoftware.com/downloads/ /downloads/([\d\.]+)/

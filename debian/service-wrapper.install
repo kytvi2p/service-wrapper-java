@@ -1,4 +1,1 @@
 bin/wrapper usr/sbin/
-lib/daemon.sh usr/share/wrapper/
-lib/make-wrapper-init.sh usr/share/wrapper/
-conf/wrapper.conf usr/share/wrapper/

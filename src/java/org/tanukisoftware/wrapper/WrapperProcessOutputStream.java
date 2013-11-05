@@ -1,7 +1,7 @@
 package org.tanukisoftware.wrapper;
 
 /*
- * Copyright (c) 1999, 2010 Tanuki Software, Ltd.
+ * Copyright (c) 1999, 2013 Tanuki Software, Ltd.
  * http://www.tanukisoftware.com
  * All rights reserved.
  *
@@ -53,13 +53,16 @@ public class WrapperProcessOutputStream
      *
      * @throws IOException in case the stream has been already closed or any
      *                     other IO error.
+     * @throws WrapperLicenseError If the function is called other than in
+     *                             the Professional Edition or from a Standalone JVM.
+     *                     
      */
     public void write( int b )
         throws IOException
     {
         synchronized( this )
         {
-            if ( !m_closed )
+            if ( ( !m_closed ) && WrapperManager.isNativeLibraryOk() )
             {
                 nativeWrite( b );
             }
@@ -74,13 +77,18 @@ public class WrapperProcessOutputStream
      * Closes the OutputStream.
      *
      * @throws IOException If there were any problems closing the stream.
+     * @throws WrapperLicenseError If the function is called other than in
+     *                             the Professional Edition or from a Standalone JVM.
      */
      public void close()
         throws IOException
      {
         if ( !m_closed )
         {
-            nativeClose();
+            if ( WrapperManager.isNativeLibraryOk() )
+            {
+                nativeClose();
+            }
             m_closed = true;
         }
     }

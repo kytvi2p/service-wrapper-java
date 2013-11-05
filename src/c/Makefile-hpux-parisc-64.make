@@ -1,4 +1,4 @@
-# Copyright (c) 1999, 2010 Tanuki Software, Ltd.
+# Copyright (c) 1999, 2013 Tanuki Software, Ltd.
 # http://www.tanukisoftware.com
 # All rights reserved.
 #
@@ -9,12 +9,11 @@
 
 COMPILE = cc +z +DD64 -D_INCLUDE__STDC_A1_SOURCE -O3 -Wall -DHPUX -DJSW64 -DUNICODE -D_UNICODE
 
-
 INCLUDE=$(JAVA_HOME)/include
 
 DEFS = -I$(INCLUDE) -I$(INCLUDE)/hp-ux
 
-wrapper_SOURCE = wrapper.c wrapperinfo.c wrappereventloop.c wrapper_unix.c property.c logger.c wrapper_i18n.c wrapper_file.c
+wrapper_SOURCE = wrapper.c wrapperinfo.c wrappereventloop.c wrapper_unix.c property.c logger.c wrapper_i18n.c wrapper_file.c wrapper_hashmap.c
 
 libwrapper_sl_SOURCE = wrapper_i18n.c wrapperjni_unix.c wrapperinfo.c wrapperjni.c
 

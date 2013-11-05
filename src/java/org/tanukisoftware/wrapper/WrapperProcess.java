@@ -1,7 +1,7 @@
 package org.tanukisoftware.wrapper;
 
 /*
- * Copyright (c) 1999, 2010 Tanuki Software, Ltd.
+ * Copyright (c) 1999, 2013 Tanuki Software, Ltd.
  * http://www.tanukisoftware.com
  * All rights reserved.
  *
@@ -32,6 +32,7 @@ public class WrapperProcess
     private int m_pid;
     private int m_exitcode;
     private boolean m_isDetached;
+    private int m_softShutdownTimeout;
 
     /*---------------------------------------------------------------
      * Constructors
@@ -49,6 +50,8 @@ public class WrapperProcess
      *-------------------------------------------------------------*/
     private native boolean nativeIsAlive();
     private native void nativeDestroy();
+    private native void nativeExitValue();
+    private native void nativeWaitFor();
 
     /*---------------------------------------------------------------
      * Methods
@@ -162,8 +165,7 @@ public class WrapperProcess
         {
             if ( m_exitcode == Integer.MIN_VALUE )
             {
-                // System.out.println("java: waiting...");
-                wait();
+                nativeWaitFor();
             }
             return m_exitcode;
         }
@@ -184,19 +186,15 @@ public class WrapperProcess
     {
         if ( m_exitcode == Integer.MIN_VALUE )
         {
-            throw new IllegalThreadStateException( 
-                    WrapperManager.getRes().getString( "The process {0} has not finished yet.",
-                            new Integer( m_pid ) ) );
+            nativeExitValue();
         }
-        else
-        {
-            return m_exitcode;
-        }
+        return m_exitcode;
     }
 
     /**
      * Returns true if the process is still alive.
-     *
+     * @throws WrapperLicenseError If the function is called other than in
+     *                             the Professional Edition or from a Standalone JVM.
      * @return True if the process is alive, false if it has terminated.
      */
     public boolean isAlive()
@@ -207,6 +205,9 @@ public class WrapperProcess
     /**
      * Kills the subprocess. The subprocess represented by this Process object
      *  is forcibly terminated if it is still running.
+     *
+     * @throws WrapperLicenseError If the function is called other than in
+     *                             the Professional Edition or from a Standalone JVM.
      */
     public void destroy()
     {

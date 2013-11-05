@@ -1,24 +1,15 @@
 Source: service-wrapper-java
 Section: java
 Priority: optional
-Maintainer: Rémi Debay <debay.remi@gmail.com>
-Uploaders: tony mancill <tmancill@debian.org>
-Build-Depends: debhelper (>= 7), 
- javahelper, 
- default-jdk, 
- ant, 
- ant-optional, 
- junit, 
- junit4
-Standards-Version: 3.9.3
-Vcs-Git: git://git.debian.org/git/collab-maint/service-wrapper-java.git
-Vcs-Browser: http://git.debian.org/?p=collab-maint/service-wrapper-java.git
-Homepage: http://wrapper.tanukisoftware.org
+Maintainer: Kill Your TV <killyourtv@i2pmail.org>
+Build-Depends: debhelper (>= 9), javahelper, default-jdk,
+ ant, ant-optional, junit, junit4, hardening-wrapper
+Standards-Version: 3.9.4
+Homepage: http://wrapper.tanukisoftware.com
 
 Package: service-wrapper
-Architecture:  amd64 i386 ia64 powerpc
-Depends:  ${shlibs:Depends}, ${misc:Depends}, libservice-wrapper-java,
- libservice-wrapper-jni
+Architecture:  any
+Depends:  ${shlibs:Depends}, ${misc:Depends}, libservice-wrapper-java (>= ${source:Version}), libservice-wrapper-jni (>= ${source:Version})
 Description:Jar daemon wrapper
  The Java Service Wrapper makes very easy to install a Java Application as a
  daemon process on Unix systems. The Wrapper monitors a JVM (Java Virtual
@@ -29,7 +20,7 @@ Description:Jar daemon wrapper
 
 Package: libservice-wrapper-java
 Architecture: all
-Depends: ${java:Depends}, ${shlibs:Depends}, ${misc:Depends} 
+Depends: ${shlibs:Depends}, ${misc:Depends}
 Description:Jar daemon wrapper java libraries
  This Package contains the Java jar libraries used by the Java Service Wrapper.
  It can be used to handle wrapper specific attributes.
@@ -42,9 +33,10 @@ Description:Jar daemon wrapper java libraries
 
 
 Package: libservice-wrapper-jni
-Architecture: amd64 i386 ia64 powerpc
-Depends: ${shlibs:Depends}, ${misc:Depends}, 
- default-jre | java5-runtime | java6-runtime
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends},
+ default-jre-headless | java5-runtime-headless | java6-runtime-headless
+Suggests: libservice-wrapper-doc
 Description:Jar daemon wrapper JNI libraries
  This Package contains the JNI libraries used by the Java Service Wrapper.
  .
@@ -54,3 +46,15 @@ Description:Jar daemon wrapper JNI libraries
  or hung. This process takes just a few seconds once the Wrapper has decided
  there is a problem. It also gives the ability to handle process priority.
 
+Package: libservice-wrapper-doc
+Section: doc
+Architecture: all
+Depends:  ${shlibs:Depends}, ${misc:Depends}
+Description:Jar daemon wrapper (javadoc files)
+ The Java Service Wrapper makes very easy to install a Java Application as a
+ daemon process on Unix systems. The Wrapper monitors a JVM (Java Virtual
+ Machine) process and automatically restarts it if it that the JVM has crashed
+ or hung. This process takes just a few seconds once the Wrapper has decided
+ there is a problem. It also gives the ability to handle process priority.
+ .
+ This package contains the javadoc files.

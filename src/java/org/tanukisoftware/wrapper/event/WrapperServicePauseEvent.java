@@ -1,7 +1,7 @@
 package org.tanukisoftware.wrapper.event;
 
 /*
- * Copyright (c) 1999, 2010 Tanuki Software, Ltd.
+ * Copyright (c) 1999, 2013 Tanuki Software, Ltd.
  * http://www.tanukisoftware.com
  * All rights reserved.
  *
@@ -37,11 +37,11 @@ public class WrapperServicePauseEvent
     /**
      * Creates a new WrapperServicePauseEvent.
      *
-     * @param sourceCode Source Code specifying where the pause action originated.
+     * @param actionSourceCode Source Code specifying where the pause action originated.
      */
-    public WrapperServicePauseEvent( int sourceCode )
+    public WrapperServicePauseEvent( int actionSourceCode )
     {
-        super( sourceCode );
+        super( actionSourceCode );
     }
     
     /*---------------------------------------------------------------
@@ -54,6 +54,6 @@ public class WrapperServicePauseEvent
      */
     public String toString()
     {
-        return "WrapperServicePauseEvent[sourceCode=" + getSourceCode() + "]";
+        return "WrapperServicePauseEvent[actionSourceCode=" + getSourceCodeName() + "]";
     }
 }

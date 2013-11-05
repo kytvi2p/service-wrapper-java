@@ -1,7 +1,7 @@
 package org.tanukisoftware.wrapper.test;
 
 /*
- * Copyright (c) 1999, 2010 Tanuki Software, Ltd.
+ * Copyright (c) 1999, 2013 Tanuki Software, Ltd.
  * http://www.tanukisoftware.com
  * All rights reserved.
  *
@@ -32,8 +32,6 @@ package org.tanukisoftware.wrapper.test;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.io.IOException;
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
 import java.util.Enumeration;
 import java.util.Properties;
 
@@ -65,6 +63,7 @@ public abstract class AbstractActionApp
     private boolean m_nestedExit;
     
     private long m_eventMask = 0xffffffffffffffffL;
+    private int m_slowSeconds = 0;
     private String m_serviceName = "testWrapper";
     private String m_consoleTitle = "Java Service Wrapper";
     private String m_childCommand = "ls";
@@ -147,6 +146,11 @@ public abstract class AbstractActionApp
         m_eventMask = eventMask;
     }
     
+    protected void setSlowSeconds( int slowSeconds )
+    {
+        m_slowSeconds = slowSeconds;
+    }
+    
     protected void setServiceName( String serviceName )
     {
         m_serviceName = serviceName;
@@ -212,67 +216,11 @@ public abstract class AbstractActionApp
         }
         else if ( action.equals( "halt0" ) )
         {
-            // Execute runtime.halt(0) using reflection so this class will
-            //  compile on 1.2.x versions of Java.
-            Method haltMethod;
-            try
-            {
-                haltMethod = Runtime.class.getMethod( "halt", new Class[] { Integer.TYPE } );
-            }
-            catch ( NoSuchMethodException e )
-            {
-                System.out.println( Main.getRes().getString( "halt not supported by current JVM." ) );
-                haltMethod = null;
-            }
-            
-            if ( haltMethod != null )
-            {
-                Runtime runtime = Runtime.getRuntime();
-                try
-                {
-                    haltMethod.invoke( runtime, new Object[] { new Integer( 0 ) } );
-                }
-                catch ( IllegalAccessException e )
-                {
-                    System.out.println( Main.getRes().getString( "Unable to call runtime.halt: {0}", e.getMessage() ) );
-                }
-                catch ( InvocationTargetException e )
-                {
-                    System.out.println( Main.getRes().getString( "Unable to call runtime.halt: {0}", e.getMessage() ) );
-                }
-            }
+            Runtime.getRuntime().halt( 0 );
         }
         else if ( action.equals( "halt1" ) )
         {
-            // Execute runtime.halt(1) using reflection so this class will
-            //  compile on 1.2.x versions of Java.
-            Method haltMethod;
-            try
-            {
-                haltMethod = Runtime.class.getMethod( "halt", new Class[] { Integer.TYPE } );
-            }
-            catch ( NoSuchMethodException e )
-            {
-                System.out.println( Main.getRes().getString( "halt not supported by current JVM." ) );
-                haltMethod = null;
-            }
-            
-            if ( haltMethod != null )
-            {
-                Runtime runtime = Runtime.getRuntime();
-                try
-                {
-                    haltMethod.invoke( runtime, new Object[] { new Integer( 1 ) } );
-                }
-                catch ( IllegalAccessException e )
-                {
-                    System.out.println( Main.getRes().getString( "Unable to call runtime.halt: {0}", e.getMessage() ) );
-                }
-                catch ( InvocationTargetException e )
-                {
-                    System.out.println( Main.getRes().getString( "Unable to call runtime.halt: {0}", e.getMessage() ) );
-                }
-            }
+            Runtime.getRuntime().halt( 1 );
         }
         else if ( action.equals( "restart" ) )
         {
@@ -286,6 +234,7 @@ public abstract class AbstractActionApp
         }
         else if ( action.equals( "access_violation" ) )
         {
+            // The bug we used to cause this is not in most modern VMs so this is not shown by default.
             WrapperManager.accessViolation();
             
         }
@@ -299,9 +248,9 @@ public abstract class AbstractActionApp
             WrapperManager.appearHung();
             
         }
-        else if ( action.equals( "appear_orphan" ) )
+        else if ( action.equals( "appear_slow" ) )
         {
-            WrapperManager.appearOrphan();
+            WrapperManager.appearSlow( m_slowSeconds );
             
         }
         else if ( action.equals( "deadlock" ) )
@@ -309,7 +258,7 @@ public abstract class AbstractActionApp
             if ( WrapperManager.isStandardEdition() )
             {
                 System.out.println( Main.getRes().getString( "Creating a 2-object deadlock...") );
-                DeadLock.create2ObjectDeadlock();
+                DeadLockBase.create2ObjectDeadlock( false, false );
             }
             else
             {
@@ -403,10 +352,14 @@ public abstract class AbstractActionApp
                                         {
                                             if ( !line.equals( "help" ) )
                                             {
-                                            System.out.println( Main.getRes().getString( "Unknown action: {0}", line ) );
+                                                System.out.println( Main.getRes().getString( "Unknown action: {0}", line ) );
                                             }
                                             printActions();
                                         }
+                                    }
+                                    else
+                                    {
+                                        System.out.println(Main.getRes().getString( "Read action: <EMPTY>" ) );
                                     }
                                 } while (true);
                             }
@@ -678,7 +631,6 @@ public abstract class AbstractActionApp
         System.err.println( Main.getRes().getString( "   nestedexit1              : Calls System.exit(1) within WrapperListener.stop(1) callback" ) );
         System.err.println( Main.getRes().getString( "   stopimmediate1           : Calls WrapperManager.stopImmediate(1)" ) );
         System.err.println( Main.getRes().getString( "  Actions which should cause the Wrapper to restart the JVM:" ) );
-        System.err.println( Main.getRes().getString( "   access_violation         : Calls WrapperManager.accessViolation" ) );
         System.err.println( Main.getRes().getString( "   access_violation_native  : Calls WrapperManager.accessViolationNative()" ) );
         System.err.println( Main.getRes().getString( "   appear_hung              : Calls WrapperManager.appearHung()" ) );
         System.err.println( Main.getRes().getString( "   halt0                    : Calls Runtime.getRuntime().halt(0)" ) );
