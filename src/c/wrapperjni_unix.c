@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999, 2010 Tanuki Software, Ltd.
+ * Copyright (c) 1999, 2013 Tanuki Software, Ltd.
  * http://www.tanukisoftware.com
  * All rights reserved.
  *
@@ -38,6 +38,7 @@
 #include <string.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <fcntl.h>
 #include <unistd.h>
 #include "wrapper_i18n.h"
 #include "wrapperjni.h"
@@ -48,7 +49,6 @@ pthread_mutex_t controlEventQueueMutex = PTHREAD_MUTEX_INITIALIZER;
 
 int wrapperLockControlEventQueue() {
     int count = 0;
-    struct timespec ts;
     /* Only wait for up to 30 seconds to make sure we don't get into a deadlock situation.
      *  This could happen if a signal is encountered while locked. */
     while (pthread_mutex_trylock(&controlEventQueueMutex) == EBUSY) {
@@ -57,10 +57,7 @@ int wrapperLockControlEventQueue() {
             fflush(NULL);
             return -1;
         }
-
-        ts.tv_sec = 0;
-        ts.tv_nsec = 10000000; /* 10ms (nanoseconds) */
-        nanosleep(&ts, NULL);
+        wrapperSleep(10);
         count++;
     }
 
@@ -141,7 +138,7 @@ JNIEXPORT void JNICALL
 Java_org_tanukisoftware_wrapper_WrapperManager_nativeInit(JNIEnv *env, jclass jClassWrapperManager, jboolean debugging) {
     TCHAR *retLocale;
     wrapperJNIDebugging = debugging;
-    
+
     /* Set the locale so we can display MultiByte characters. */
     retLocale = _tsetlocale(LC_ALL, TEXT(""));
 #if defined(UNICODE)
@@ -169,6 +166,41 @@ Java_org_tanukisoftware_wrapper_WrapperManager_nativeInit(JNIEnv *env, jclass jC
 
     /* Store the current process Id */
     wrapperProcessId = getpid();
+}
+
+/*
+ * Class:     org_tanukisoftware_wrapper_WrapperManager
+ * Method:    nativeRedirectPipes
+ * Signature: ()I
+ */
+JNIEXPORT jint JNICALL
+Java_org_tanukisoftware_wrapper_WrapperManager_nativeRedirectPipes(JNIEnv *evn, jclass clazz) {
+    int fd;
+    
+    fd = _topen(TEXT("/dev/null"), O_RDWR, 0);
+    if (fd != -1) {
+        if (!redirectedStdErr) {
+            _ftprintf(stderr, TEXT("WrapperJNI: Redirecting %s to /dev/null\n"), TEXT("StdErr")); fflush(NULL);
+            if (dup2(fd, STDERR_FILENO) == -1) {
+                _ftprintf(stderr, TEXT("WrapperJNI: Failed to redirect %s to /dev/null  (Err: %s)\n"), TEXT("StdErr"), getLastErrorText()); fflush(NULL);
+            } else {
+                redirectedStdErr = TRUE;
+            }
+        }
+        
+        if (!redirectedStdOut) {
+            _tprintf(TEXT("WrapperJNI: Redirecting %s to /dev/null\n"), TEXT("StdOut")); fflush(NULL);
+            if (dup2(fd, STDOUT_FILENO) == -1) {
+                _tprintf(TEXT("WrapperJNI: Failed to redirect %s to /dev/null  (Err: %s)\n"), TEXT("StdOut"), getLastErrorText()); fflush(NULL);
+            } else {
+                redirectedStdOut = TRUE;
+            }
+        }
+    } else {
+        _ftprintf(stderr, TEXT("WrapperJNI: Failed to open /dev/null  (Err: %s)\n"), getLastErrorText()); fflush(NULL);
+    }
+    
+    return 0;
 }
 
 /*
@@ -267,21 +299,21 @@ Java_org_tanukisoftware_wrapper_WrapperManager_nativeGetUser(JNIEnv *env, jclass
                             /* Now create the new wrapperUser using the constructor arguments collected above. */
                             wrapperUser = (*env)->NewObject(env, wrapperUserClass, constructor,
                                     uid, ugid, jstringUser, jstringRealName, jstringHome, jstringShell);
-                            
+
                             /* If the caller requested the user's groups then look them up. */
                             if (groups) {
                                 /* Set the user group. */
                                 if ((setGroup = (*env)->GetMethodID(env, wrapperUserClass, utf8MethodSetGroup, utf8SigIStringrV)) != NULL) {
                                     if ((aGroup = getgrgid(ugid)) != NULL) {
                                         ggid = aGroup->gr_gid;
-                                        
+
                                         /* Group name */
                                         jstringGroupName = JNU_NewStringFromNativeChar(env, aGroup->gr_name);
                                         if (jstringGroupName) {
                                             /* Add the group to the user. */
                                             (*env)->CallVoidMethod(env, wrapperUser, setGroup,
                                                     ggid, jstringGroupName);
-                                            
+
                                             (*env)->DeleteLocalRef(env, jstringGroupName);
                                         } else {
                                             /* Exception Thrown */
@@ -290,7 +322,7 @@ Java_org_tanukisoftware_wrapper_WrapperManager_nativeGetUser(JNIEnv *env, jclass
                                 } else {
                                     /* Exception Thrown */
                                 }
-                
+
                                 /* Look for the addGroup method. Ignore failures. */
                                 if ((addGroup = (*env)->GetMethodID(env, wrapperUserClass, utf8MethodAddGroup, utf8SigIStringrV)) != NULL) {
                                     setgrent();
@@ -304,17 +336,17 @@ Java_org_tanukisoftware_wrapper_WrapperManager_nativeGetUser(JNIEnv *env, jclass
                                             }
                                             i++;
                                         }
-                
+
                                         if (member) {
                                             ggid = aGroup->gr_gid;
-                                            
+
                                             /* Group name */
                                             jstringGroupName = JNU_NewStringFromNativeChar(env, aGroup->gr_name);
                                             if (jstringGroupName) {
                                                 /* Add the group to the user. */
                                                 (*env)->CallVoidMethod(env, wrapperUser, addGroup,
                                                         ggid, jstringGroupName);
-                                                
+
                                                 (*env)->DeleteLocalRef(env, jstringGroupName);
                                             } else {
                                                 /* Exception Thrown */
@@ -326,22 +358,22 @@ Java_org_tanukisoftware_wrapper_WrapperManager_nativeGetUser(JNIEnv *env, jclass
                                     /* Exception Thrown */
                                 }
                             }
-                            
+
                             (*env)->DeleteLocalRef(env, jstringShell);
                         } else {
                             /* Exception Thrown */
                         }
-                        
+
                         (*env)->DeleteLocalRef(env, jstringHome);
                     } else {
                         /* Exception Thrown */
                     }
-                    
+
                     (*env)->DeleteLocalRef(env, jstringRealName);
                 } else {
                     /* Exception Thrown */
                 }
-                                                        
+
                 (*env)->DeleteLocalRef(env, jstringUser);
             } else {
                 /* Exception Thrown */

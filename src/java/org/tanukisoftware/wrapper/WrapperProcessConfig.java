@@ -1,7 +1,7 @@
 package org.tanukisoftware.wrapper;
 
 /*
- * Copyright (c) 1999, 2010 Tanuki Software, Ltd.
+ * Copyright (c) 1999, 2013 Tanuki Software, Ltd.
  * http://www.tanukisoftware.com
  * All rights reserved.
  *
@@ -42,9 +42,11 @@ public final class WrapperProcessConfig
     public static final int DYNAMIC = 4;
 
     private boolean m_isDetached;
+    private boolean m_isInteractive;
     private File m_defdir;
     private int m_startType;
     private Map m_environment;
+    private int m_softShutdownTimeout;
 
     private native String[] nativeGetEnv();
     private static native boolean isSupportedNative( int startType );
@@ -70,6 +72,8 @@ public final class WrapperProcessConfig
         m_defdir = null;
         m_startType = DYNAMIC;
         m_environment = null;
+        m_softShutdownTimeout = 5;
+        m_isInteractive = false;
     }
 
     /*---------------------------------------------------------------
@@ -84,8 +88,8 @@ public final class WrapperProcessConfig
      * @return true if supported, false otherwise. On Windows, this method always returns
      *              true.
      *
-     * @throws WrapperLicenseError If the Professional Edition of the Wrapper
-     *                              is not being used.
+     * @throws WrapperLicenseError If the function is called other than in
+     *                             the Professional Edition or from a Standalone JVM.
      * @throws IllegalArgumentException If the startType is invalid.
      */
     public static boolean isSupported( int startType )
@@ -96,7 +100,14 @@ public final class WrapperProcessConfig
             throw new WrapperLicenseError(  WrapperManager.getRes().getString( "Requires the Professional Edition." ) );
         }
         verifyStartType( startType );
-        return isSupportedNative( startType );
+        if ( WrapperManager.isNativeLibraryOk() )
+        {
+            return isSupportedNative( startType );
+        }
+        else
+        {
+            return false;
+        }
     }
     
     /**
@@ -235,6 +246,8 @@ public final class WrapperProcessConfig
      *  is launched.  Alternately, the environment can be set with the
      *  setEnvironment method.  Clearing the Map will result in an empty
      *  environment being used.
+     *  @throws WrapperLicenseError If the function is called other than in
+     *                             the Professional Edition or from a Standalone JVM.
      */
     public Map getEnvironment()
         throws WrapperLicenseError
@@ -293,6 +306,37 @@ public final class WrapperProcessConfig
         return this;
     }
 
+    /**
+     * Sets the timeout for the soft shtudown in seconds.
+     * When WrapperProcess.destroy() is called the wrapper will first try to
+     * stop the application softly giving it time to stop itself properly.
+     * If the specified timeout however ellapsed, the Child Process will be 
+     * terminated by hard.
+     * If 0 was specified, the wrapper will instantly force the termination.
+     * If -1 was specified, the wrapper will wait indefinitely for the child
+     * to perform the stop.
+     * The default value of this property is 5 - giving a process 5 sec to 
+     * react on the shutdown request.
+     *
+     * @param softShutdownTimeout The max timeout for an application to stop, before 
+     *                            killing forcibly
+     *
+     * @return This configration to allow chaining.
+     *
+     * @throws IllegalArgumentException If the value of the specified timeout is invalid.
+     */
+    public WrapperProcessConfig setSoftShutdownTimeout( int softShutdownTimeout )
+        throws IOException
+    {
+        if ( softShutdownTimeout < -1 ) {
+            throw new IllegalArgumentException( WrapperManager.getRes().getString( "{0} is not a valid value for a timeout.", 
+                                   new Integer ( softShutdownTimeout ) ) );
+        }
+        m_softShutdownTimeout = softShutdownTimeout;
+        return this;
+    }
+
+
     /*---------------------------------------------------------------
      * Private Methods
      *-------------------------------------------------------------*/
@@ -326,13 +370,16 @@ public final class WrapperProcessConfig
     private Map getDefaultEnvironment()
     {
         Map environment = new HashMap();
-        String[] nativeEnv = nativeGetEnv();
-        for ( int i = 0; i < nativeEnv.length; i++ )
+        if ( WrapperManager.isNativeLibraryOk() )
         {
-            int pos = nativeEnv[i].indexOf( '=' );
-            String name = nativeEnv[i].substring( 0, pos );
-            String value = nativeEnv[i].substring( pos + 1 );
-            environment.put( name, value );
+            String[] nativeEnv = nativeGetEnv();
+            for ( int i = 0; i < nativeEnv.length; i++ )
+            {
+                int pos = nativeEnv[i].indexOf( '=' );
+                String name = nativeEnv[i].substring( 0, pos );
+                String value = nativeEnv[i].substring( pos + 1 );
+                environment.put( name, value );
+            }
         }
 
         return environment;
@@ -345,7 +392,14 @@ public final class WrapperProcessConfig
     {
         if ( m_environment == null )
         {
-            return nativeGetEnv();
+            if ( WrapperManager.isNativeLibraryOk() )
+            {
+                return nativeGetEnv();
+            }
+            else
+            {
+                return new String[0];
+            }
         }
         else
         {
@@ -359,5 +413,38 @@ public final class WrapperProcessConfig
             }
             return nativeEnv;
         }
+    }
+
+
+/**
+ *  Specifies if the ChildProcesses should be launched
+ *  in the current session. 
+ *  This property only makes sense if the application was
+ *  launched as Windows Service under the System User (or any
+ *  other user, having SE_TCB_NAME previledge with the OS)
+ *  On non-Windows platforms or when launched in Console mode,
+ *  the setting will be ignored silently.
+ *
+ * @param isInteractive true to enable the feature. 
+ */
+    public WrapperProcessConfig setCreateForActiveUser( boolean isInteractive )
+    {
+        if (WrapperManager.isWindows() && WrapperManager.isLaunchedAsService())
+        {
+            m_isInteractive = true;
+        }
+        else
+        {
+            m_isInteractive = false;
+        }
+        return this;
+    }
+
+/**
+ *  Tells if the CreateForActiveUser feature was enabled.
+ */
+    public boolean isCreateForActiveUser()
+    {
+        return m_isInteractive;
     }
 }

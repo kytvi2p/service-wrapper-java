@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999, 2010 Tanuki Software, Ltd.
+ * Copyright (c) 1999, 2013 Tanuki Software, Ltd.
  * http://www.tanukisoftware.com
  * All rights reserved.
  *
@@ -57,6 +57,7 @@
 #include "wrapperinfo.h"
 #include "property.h"
 #include "logger.h"
+#include "wrapper_file.h"
 
 #include <sys/resource.h>
 #include <sys/time.h>
@@ -77,20 +78,27 @@ pid_t getsid(pid_t pid);
 #define max(x,y) (((x) > (y)) ? (x) : (y))
 #define min(x,y) (((x) < (y)) ? (x) : (y))
 
-int jvmOut = -1;
 
 /* Define a global pipe descriptor so that we don't have to keep allocating
  *  a new pipe each time a JVM is launched. */
-int pipedes[2];
-int pipeInitialized = 0;
+int pipedes[2] = {-1, -1};
+#define PIPE_READ_END 0
+#define PIPE_WRITE_END 1
 
 TCHAR wrapperClasspathSeparator = TEXT(':');
+
+int javaIOThreadSet = FALSE;
+pthread_t javaIOThreadId;
+int javaIOThreadStarted = FALSE;
+int stopJavaIOThread = FALSE;
+int javaIOThreadStopped = FALSE;
 
 int timerThreadSet = FALSE;
 pthread_t timerThreadId;
 int timerThreadStarted = FALSE;
 int stopTimerThread = FALSE;
 int timerThreadStopped = FALSE;
+
 TICKS timerTicks = WRAPPER_TICK_INITIAL;
 
 /******************************************************************************
@@ -100,7 +108,8 @@ TICKS timerTicks = WRAPPER_TICK_INITIAL;
 /**
  * exits the application after running shutdown code.
  */
-void appExit(int exitCode) {
+void appExit(int exitCode, int argc, TCHAR** argv) {
+    int i;
     /* Remove pid file.  It may no longer exist. */
     if (wrapperData->pidFilename) {
         _tunlink(wrapperData->pidFilename);
@@ -133,7 +142,16 @@ void appExit(int exitCode) {
 
     /* Common wrapper cleanup code. */
     wrapperDispose();
-
+#if defined(UNICODE)
+    for (i = 0; i < argc; i++) {
+        if (argv[i]) {
+            free(argv[i]);
+        }
+    }
+    if (argv) {
+        free(argv);
+    }
+#endif
     exit(exitCode);
 }
 
@@ -149,10 +167,19 @@ int wrapperGetLastError() {
  *
  * filename: File to write to.
  * pid: pid to write in the file.
+ * strict: If true then an error will be reported and the call will fail if the
+ *         file already exists.
+ *
+ * return 1 if there was an error, 0 if Ok.
  */
-int writePidFile(const TCHAR *filename, DWORD pid, int newUmask) {
+int writePidFile(const TCHAR *filename, DWORD pid, int newUmask, int strict) {
     FILE *pid_fp = NULL;
     int old_umask;
+
+    if (strict && wrapperFileExists(filename)) {
+        log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_ERROR, TEXT("%d pid file, %s, already exists."), pid, filename);
+        return 1;
+    }
 
     old_umask = umask(newUmask);
     pid_fp = _tfopen(filename, TEXT("w"));
@@ -207,20 +234,27 @@ void takeSignalAction(int sigNum, const TCHAR *sigName, int mode) {
                 (wrapperData->jState == WRAPPER_JSTATE_STOPPED) ||
                 (wrapperData->jState == WRAPPER_JSTATE_KILLING) ||
                 (wrapperData->jState == WRAPPER_JSTATE_KILL) ||
-                (wrapperData->jState == WRAPPER_JSTATE_DOWN_CHECK)) {
+                (wrapperData->jState == WRAPPER_JSTATE_DOWN_CHECK) ||
+                (wrapperData->jState == WRAPPER_JSTATE_DOWN_FLUSH)) {
 
                 /* Signaled while we were already shutting down. */
-                log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS,
-                    TEXT("%s trapped.  Forcing immediate shutdown."), sigName);
-
-                /* Disable the thread dump on exit feature if it is set because it
-                 *  should not be displayed when the user requested the immediate exit. */
-                wrapperData->requestThreadDumpOnFailedJVMExit = FALSE;
-                wrapperKillProcess();
+                if (wrapperData->isForcedShutdownDisabled) {
+                    log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS,
+                        TEXT("%s trapped.  Already shutting down."), sigName);
+                } else {
+                    log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS,
+                        TEXT("%s trapped.  Forcing immediate shutdown."), sigName);
+    
+                    /* Disable the thread dump on exit feature if it is set because it
+                     *  should not be displayed when the user requested the immediate exit. */
+                    wrapperData->requestThreadDumpOnFailedJVMExit = FALSE;
+                    wrapperKillProcess();
+                }
             } else {
                 log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS,
                     TEXT("%s trapped.  Shutting down."), sigName);
-                wrapperStopProcess(0);
+                /* Always force the shutdown as this is an external event. */
+                wrapperStopProcess(0, TRUE);
             }
             /* Don't actually kill the process here.  Let the application shut itself down */
 
@@ -393,11 +427,13 @@ const TCHAR* getSignalCodeDesc(int code) {
  * Describe a signal.  This is called from within signal handlers so NO MALLOCs are allowed here.
  */
 void descSignal(siginfo_t *sigInfo) {
+#ifdef SI_USER
     struct passwd *pw;
-#ifdef UNICODE
+ #ifdef UNICODE
     size_t req;
-#endif
+ #endif
     TCHAR *uName;
+#endif
 
     /* Not supported on all platforms */
     if (sigInfo == NULL) {
@@ -437,9 +473,9 @@ void descSignal(siginfo_t *sigInfo) {
             if (pw == NULL) {
                 uName = TEXT("<unknown>");
             } else {
-#ifndef UNICODE
+ #ifndef UNICODE
                 uName = pw->pw_name;
-#else
+ #else
                 req = mbstowcs(NULL, pw->pw_name, 0) + 1;
                 uName = malloc(req * sizeof(TCHAR));
                 if (!uName) {
@@ -447,20 +483,20 @@ void descSignal(siginfo_t *sigInfo) {
                     return;
                 }
                 mbstowcs(uName, pw->pw_name, req + 1);
-#endif
+ #endif
             }
 
             /* It appears that the getsid function was added in version 1.3.44 of the linux kernel. */
             log_printf_queue(TRUE, WRAPPER_SOURCE_WRAPPER, LEVEL_DEBUG,
-#ifdef UNICODE
+ #ifdef UNICODE
                 TEXT("  signal generated by PID: %d (Session PID: %d), UID: %d (%S)"),
-#else
+ #else
                 TEXT("  signal generated by PID: %d (Session PID: %d), UID: %d (%s)"),
-#endif
+ #endif
                 sigInfo->si_pid, getsid(sigInfo->si_pid), sigInfo->si_uid, uName);
-#ifdef UNICODE
+ #ifdef UNICODE
             free(uName);
-#endif
+ #endif
         }
 #endif
     }
@@ -550,6 +586,8 @@ void sigActionChildDeath(int sigNum, siginfo_t *sigInfo, void *na) {
                 TEXT("Received SIGCHLD, checking JVM process status."));
         }
         
+        /* This is set whenever any child signals that it has exited.
+         *  Inside the code we go on to check to make sure that we only test for the JVM */
         wrapperData->signalChildTrapped = TRUE;
     }
 }
@@ -621,17 +659,127 @@ int registerSigAction(int sigNum, void (*sigAction)(int, siginfo_t *, void *)) {
 }
 
 /**
+ * The main entry point for the javaio thread which is started by
+ *  initializeJavaIO().  Once started, this thread will run for the
+ *  life of the process.
+ *
+ * This thread will only be started if we are configured to use a
+ *  dedicated thread to read JVM output.
+ */
+void *javaIORunner(void *arg) {
+    sigset_t signal_mask;
+    int nextSleep;
+#ifndef VALGRIND
+    int rc;
+#endif
+
+    javaIOThreadStarted = TRUE;
+    
+    /* Immediately register this thread with the logger. */
+    logRegisterThread(WRAPPER_THREAD_JAVAIO);
+
+    /* mask signals so the javaIO doesn't get any of these. */
+    sigemptyset(&signal_mask);
+    sigaddset(&signal_mask, SIGTERM);
+    sigaddset(&signal_mask, SIGINT);
+    sigaddset(&signal_mask, SIGQUIT);
+    sigaddset(&signal_mask, SIGALRM);
+    sigaddset(&signal_mask, SIGHUP);
+    sigaddset(&signal_mask, SIGUSR1);
+#ifndef VALGRIND
+    sigaddset(&signal_mask, SIGUSR2);
+    rc = pthread_sigmask(SIG_BLOCK, &signal_mask, NULL);
+    if (rc != 0) {
+        log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_ERROR, TEXT("Could not mask signals for javaIO thread."));
+    }
+#endif
+
+    if (wrapperData->isJavaIOOutputEnabled) {
+        log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS, TEXT("JavaIO thread started."));
+    }
+
+    nextSleep = TRUE;
+    /* Loop until we are shutting down, but continue as long as there is more output from the JVM. */
+    while ((!stopJavaIOThread) || (!nextSleep)) {
+        if (nextSleep) {
+            /* Sleep as little as possible. */
+            wrapperSleep(1);
+        }
+        nextSleep = TRUE;
+        
+        if (wrapperData->pauseThreadJavaIO) {
+            wrapperPauseThread(wrapperData->pauseThreadJavaIO, TEXT("javaio"));
+            wrapperData->pauseThreadJavaIO = 0;
+        }
+        
+        if (wrapperReadChildOutput(0)) {
+            if (wrapperData->isDebugging) {
+                log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_DEBUG,
+                    TEXT("Pause reading child process output to share cycles."));
+            }
+            nextSleep = FALSE;
+        }
+    }
+
+    javaIOThreadStopped = TRUE;
+    if (wrapperData->isJavaIOOutputEnabled) {
+        log_printf_queue(TRUE, WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS, TEXT("JavaIO thread stopped."));
+    }
+    return NULL;
+}
+
+/**
+ * Creates a process whose job is to loop and simply increment a ticks
+ *  counter.  The tick counter can then be used as a clock as an alternative
+ *  to using the system clock.
+ */
+int initializeJavaIO() {
+    int res;
+
+    if (wrapperData->isJavaIOOutputEnabled) {
+        log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS, TEXT("Launching JavaIO thread."));
+    }
+
+    res = pthread_create(&javaIOThreadId,
+        NULL, /* No attributes. */
+        javaIORunner,
+        NULL); /* No parameters need to be passed to the thread. */
+    if (res) {
+        log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_FATAL,
+            TEXT("Unable to create a javaIO thread: %d, %s"), res, getLastErrorText());
+        javaIOThreadSet = TRUE;
+        return 1;
+    } else {
+        if (pthread_detach(javaIOThreadId)) {
+            javaIOThreadSet = TRUE;
+            return 1;
+        }
+        javaIOThreadSet = FALSE;
+        return 0;
+    }
+}
+
+void disposeJavaIO() {
+    stopJavaIOThread = TRUE;
+    /* Wait until the javaIO thread is actually stopped to avoid timing problems. */
+    if (javaIOThreadStarted) {
+        while (!javaIOThreadStopped) {
+#ifdef _DEBUG
+            wprintf(TEXT("Waiting for javaIO thread to stop.\n"));
+#endif
+            wrapperSleep(100);
+        }
+        pthread_cancel(javaIOThreadId);
+    }
+}
+
+/**
  * The main entry point for the timer thread which is started by
  *  initializeTimer().  Once started, this thread will run for the
  *  life of the process.
  *
  * This thread will only be started if we are configured NOT to
  *  use the system time as a base for the tick counter.
- *
- * All logging within this thread is intentionally using the Queued
- *  logging.  This is not because of lock problems, but rather because
- *  it is much faster and will be less likely to cause any delays in
- *  the looping of the timer.
  */
 void *timerRunner(void *arg) {
     TICKS sysTicks;
@@ -671,7 +819,12 @@ void *timerRunner(void *arg) {
     }
 
     while (!stopTimerThread) {
-        wrapperSleep(TRUE, WRAPPER_TICK_MS);
+        wrapperSleep(WRAPPER_TICK_MS);
+        
+        if (wrapperData->pauseThreadTimer) {
+            wrapperPauseThread(wrapperData->pauseThreadTimer, TEXT("timer"));
+            wrapperData->pauseThreadTimer = 0;
+        }
 
         /* Get the tick count based on the system time. */
         sysTicks = wrapperGetSystemTicks();
@@ -719,6 +872,9 @@ void *timerRunner(void *arg) {
     }
 
     timerThreadStopped = TRUE;
+    if (wrapperData->isTickOutputEnabled) {
+        log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS, TEXT("Timer thread stopped."));
+    }
     return NULL;
 }
 
@@ -744,6 +900,10 @@ int initializeTimer() {
         timerThreadSet = TRUE;
         return 1;
     } else {
+        if (pthread_detach(timerThreadId)) {
+            timerThreadSet = TRUE;
+            return 1;
+        }
         timerThreadSet = FALSE;
         return 0;
     }
@@ -751,15 +911,15 @@ int initializeTimer() {
 
 void disposeTimer() {
     stopTimerThread = TRUE;
-    
     /* Wait until the timer thread is actually stopped to avoid timing problems. */
     if (timerThreadStarted) {
         while (!timerThreadStopped) {
 #ifdef _DEBUG
             wprintf(TEXT("Waiting for timer thread to stop.\n"));
 #endif
-            wrapperSleep(FALSE, 100);
+            wrapperSleep(100);
         }
+        pthread_cancel(timerThreadId);
     }
 }
 
@@ -809,6 +969,17 @@ int wrapperInitializeRun() {
             return res;
         }
     }
+    
+    if (wrapperData->useJavaIOThread) {
+        /* Create and initialize a javaIO thread. */
+        if ((res = initializeJavaIO()) != 0) {
+            return res;
+        }
+    } else {
+        javaIOThreadSet = FALSE;
+        /* Unable to set the javaIOThreadId to a null value on all platforms
+         * javaIOThreadId = 0;*/
+    }
 
     return retval;
 }
@@ -816,15 +987,19 @@ int wrapperInitializeRun() {
 /**
  * Cause the current thread to sleep for the specified number of milliseconds.
  *  Sleeps over one second are not allowed.
+ *
+ * @param ms Number of milliseconds to wait for.
+ *
+ * @return TRUE if the was interrupted, FALSE otherwise.  Neither is an error.
  */
-void wrapperSleep(int useLoggerQueue, int ms) {
+int wrapperSleep(int ms) {
     /* We want to use nanosleep if it is available, but make it possible for the
        user to build a version that uses usleep if they want.
        usleep does not behave nicely with signals thrown while sleeping.  This
        was the believed cause of a hang experienced on one Solaris system. */
 #ifdef USE_USLEEP
     if (wrapperData->isSleepOutputEnabled) {
-        log_printf_queue(useLoggerQueue, WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS,
+        log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS,
             TEXT("    Sleep: usleep %dms"), ms);
     }
     usleep(ms * 1000); /* microseconds */
@@ -840,32 +1015,46 @@ void wrapperSleep(int useLoggerQueue, int ms) {
     }
 
     if (wrapperData->isSleepOutputEnabled) {
-        log_printf_queue(useLoggerQueue, WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS,
-           TEXT("    Sleep: nanosleep %dms"), ms);
+        log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS, TEXT("    Sleep: nanosleep %dms"), ms);
     }
     if (nanosleep(&ts, NULL)) {
         if (errno == EINTR) {
             if (wrapperData->isSleepOutputEnabled) {
-                log_printf_queue(useLoggerQueue, WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS,
+                log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS,
                     TEXT("    Sleep: nanosleep interrupted"));
             }
+            return TRUE;
         } else if (errno == EAGAIN) {
             /* On 64-bit AIX this happens once on shutdown. */
             if (wrapperData->isSleepOutputEnabled) {
-                log_printf_queue(useLoggerQueue, WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS,
+                log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS,
                     TEXT("    Sleep: nanosleep unavailable"));
             }
+            return TRUE;
         } else {
-            log_printf_queue(useLoggerQueue, WRAPPER_SOURCE_WRAPPER, LEVEL_ERROR,
+            log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_ERROR,
                 TEXT("nanosleep(%dms) failed. %s"), ms, getLastErrorText());
         }
     }
 #endif
 
     if (wrapperData->isSleepOutputEnabled) {
-        log_printf_queue(useLoggerQueue, WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS, TEXT("    Sleep: awake"));
+        log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS, TEXT("    Sleep: awake"));
     }
+    
+    return FALSE;
 }
+
+/**
+ * Detaches the Java process so the Wrapper will if effect forget about it.
+ */
+void wrapperDetachJava() {
+    wrapperSetJavaState(WRAPPER_JSTATE_DOWN_CLEAN, 0, -1);
+    
+    /* Leave the stdout/stderr pipe in pipedes alone so we grab any remaining output.
+     *  They should have been redirected on the JVM side anyway. */
+}
+
 
 /**
  * Build the java command line.
@@ -935,7 +1124,7 @@ int wrapperBuildJavaCommand() {
                 outOfMemory(TEXT("WBJC"), 2);
                 return TRUE;
             }
-            _tcscpy(wrapperData->jvmCommand[i], strings[i]);
+            _tcsncpy(wrapperData->jvmCommand[i], strings[i], _tcslen(strings[i]) + 1);
         } else {
             wrapperData->jvmCommand[i] = NULL;
         }
@@ -953,15 +1142,11 @@ int wrapperBuildJavaCommand() {
 void wrapperExecute() {
     pid_t proc;
 
-    /* Only allocate a pipe if we have not already done so. */
-    if (!pipeInitialized) {
-        /* Create the pipe. */
-        if (pipe(pipedes) < 0) {
-            log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_ERROR,
-                       TEXT("Could not init pipe: %s"), getLastErrorText());
-            return;
-        }
-        pipeInitialized = TRUE;
+    /* Create the pipe. */
+    if (pipe(pipedes) < 0) {
+        log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_ERROR,
+                   TEXT("Could not init pipe: %s"), getLastErrorText());
+        return;
     }
 
     /* Make sure the log file is closed before the Java process is created.  Failure to do
@@ -971,6 +1156,10 @@ void wrapperExecute() {
      *  threads do not reopen the log file as the new process is being created. */
     setLogfileAutoClose(TRUE);
     closeLogfile();
+        
+    /* Reset the log duration so we get new counts from the time the JVM is launched. */
+    resetDuration();
+    
     /* Fork off the child. */
     proc = fork();
 
@@ -978,7 +1167,7 @@ void wrapperExecute() {
         /* Fork failed. */
 
         /* Restore the auto close flag. */
-        setLogfileAutoClose(wrapperData->logfileInactivityTimeout <= 0);
+        setLogfileAutoClose(wrapperData->logfileCloseTimeout == 0);
 
         log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_FATAL,
                    TEXT("Could not spawn JVM process: %s"), getLastErrorText());
@@ -1005,19 +1194,38 @@ void wrapperExecute() {
              * TODO: Figure out a way to fix this.  Maybe using shared memory? */
 
             /* Send output to the pipe by dupicating the pipe fd and setting the copy as the stdout fd. */
-            if (dup2(pipedes[STDOUT_FILENO], STDOUT_FILENO) < 0) {
+            if (dup2(pipedes[PIPE_WRITE_END], STDOUT_FILENO) < 0) {
                 log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_ERROR,
                     TEXT("%sUnable to set JVM's stdout: %s"), LOG_FORK_MARKER, getLastErrorText());
                 return;
             }
 
             /* Send errors to the pipe by dupicating the pipe fd and setting the copy as the stderr fd. */
-            if (dup2(pipedes[STDOUT_FILENO], STDERR_FILENO) < 0) {
+            if (dup2(pipedes[PIPE_WRITE_END], STDERR_FILENO) < 0) {
                 log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_ERROR,
                     TEXT("%sUnable to set JVM's stderr: %s"), LOG_FORK_MARKER, getLastErrorText());
                 return;
             }
+            
+            /* Close both ends of the pipe as we have already duplicated the Write end for our purposes. */
+            close(pipedes[PIPE_READ_END]);
+            pipedes[PIPE_READ_END] = -1;
+            close(pipedes[PIPE_WRITE_END]);
+            pipedes[PIPE_WRITE_END] = -1;
 
+            /* forking at this point, the child process has set all pipes already, so no
+               further assignments needed */
+            if (wrapperData->printJVMVersion) {
+                if (fork() == 0) {
+                    /* in the child */
+                    TCHAR *javaVersionArgv[3];
+                    javaVersionArgv[0] = wrapperData->jvmCommand[0];
+                    javaVersionArgv[1] = TEXT("-version");
+                    javaVersionArgv[2] = 0;
+                    _texecvp(wrapperData->jvmCommand[0], javaVersionArgv);
+                }
+                /* we don't care about errors here, since they will be reported later */
+            }
             /* The pipedes array is global so do not close the pipes. */
             /* Child process: execute the JVM. */
             _texecvp(wrapperData->jvmCommand[0], wrapperData->jvmCommand);
@@ -1052,21 +1260,24 @@ void wrapperExecute() {
         } else {
             /* We are the parent side. */
             wrapperData->javaPID = proc;
-            jvmOut = pipedes[STDIN_FILENO];
+            
+            /* Close the write end as it is not used. */
+            close(pipedes[PIPE_WRITE_END]);
+            pipedes[PIPE_WRITE_END] = -1;
 
             /* Restore the auto close flag. */
-            setLogfileAutoClose(wrapperData->logfileInactivityTimeout <= 0);
+            setLogfileAutoClose(wrapperData->logfileCloseTimeout == 0);			
 
             /* The pipedes array is global so do not close the pipes. */
 
             /* Mark our side of the pipe so that it won't block
              * and will close on exec, so new children won't see it. */
-            if (fcntl(jvmOut, F_SETFL, O_NONBLOCK) < 0) {
+            if (fcntl(pipedes[PIPE_READ_END], F_SETFL, O_NONBLOCK) < 0) {
                 log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_ERROR,
                     TEXT("Failed to set JVM output handle to non blocking mode: %s (%d)"),
                     getLastErrorText(), errno);
             }
-            if (fcntl(jvmOut, F_SETFD, FD_CLOEXEC) < 0) {
+            if (fcntl(pipedes[PIPE_READ_END], F_SETFD, FD_CLOEXEC) < 0) {
                 log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_ERROR,
                     TEXT("Failed to set JVM output handle to close on JVM exit: %s (%d)"),
                     getLastErrorText(), errno);
@@ -1074,15 +1285,15 @@ void wrapperExecute() {
 
             /* If a java pid filename is specified then write the pid of the java process. */
             if (wrapperData->javaPidFilename) {
-                if (writePidFile(wrapperData->javaPidFilename, wrapperData->javaPID, wrapperData->javaPidFileUmask)) {
+                if (writePidFile(wrapperData->javaPidFilename, wrapperData->javaPID, wrapperData->javaPidFileUmask, FALSE)) {
                     log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_WARN,
                         TEXT("Unable to write the Java PID file: %s"), wrapperData->javaPidFilename);
                 }
             }
 
-            /* If a java id filename is specified then write the pid of the java process. */
+            /* If a java id filename is specified then write the Id of the java process. */
             if (wrapperData->javaIdFilename) {
-                if (writePidFile(wrapperData->javaIdFilename, wrapperData->jvmRestarts, wrapperData->javaIdFileUmask)) {
+                if (writePidFile(wrapperData->javaIdFilename, wrapperData->jvmRestarts, wrapperData->javaIdFileUmask, FALSE)) {
                     log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_WARN,
                         TEXT("Unable to write the Java Id file: %s"), wrapperData->javaIdFilename);
                 }
@@ -1202,6 +1413,12 @@ int wrapperGetProcessStatus(TICKS nowTicks, int sigChild) {
     int status;
     int exitCode;
     int res;
+    
+    if (wrapperData->javaPID <= 0) {
+        /* We do not think that a JVM is currently running so return that it is down.
+         * If we call waitpid with 0, it will wait for any child and cause problems with the event commands. */
+        return WRAPPER_PROCESS_DOWN;
+    }
 
     retval = waitpid(wrapperData->javaPID, &status, WNOHANG | WUNTRACED);
     if (retval == 0) {
@@ -1213,15 +1430,16 @@ int wrapperGetProcessStatus(TICKS nowTicks, int sigChild) {
         res = WRAPPER_PROCESS_UP;
     } else if (retval < 0) {
         if (errno == ECHILD) {
-            if (wrapperData->jState == WRAPPER_JSTATE_DOWN_CHECK ||
-                wrapperData->jState == WRAPPER_JSTATE_DOWN_CLEAN ||
-                wrapperData->jState == WRAPPER_JSTATE_STOPPED) {
+            if ((wrapperData->jState == WRAPPER_JSTATE_DOWN_CHECK) ||
+                (wrapperData->jState == WRAPPER_JSTATE_DOWN_FLUSH) ||
+                (wrapperData->jState == WRAPPER_JSTATE_DOWN_CLEAN) ||
+                (wrapperData->jState == WRAPPER_JSTATE_STOPPED)) {
                 res = WRAPPER_PROCESS_DOWN;
                 wrapperJVMProcessExited(nowTicks, 0);
                 return res;
             } else {
-            /* Process is gone.  Happens after a SIGCHLD is handled. Normal. */
-            log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS, TEXT("JVM process is gone."));
+                /* Process is gone.  Happens after a SIGCHLD is handled. Normal. */
+                log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS, TEXT("JVM process is gone."));
             }
         } else {
             /* Error requesting the status. */
@@ -1282,7 +1500,7 @@ void wrapperReportStatus(int useLoggerQueue, int status, int errorCode, int wait
  * Returns TRUE if there were any problems, FALSE otherwise.
  */
 int wrapperReadChildOutputBlock(char *blockBuffer, int blockSize, int *readCount) {
-    if (jvmOut == -1) {
+    if (pipedes[PIPE_READ_END] == -1) {
         /* The child is not up. */
         *readCount = 0;
         return FALSE;
@@ -1293,15 +1511,15 @@ int wrapperReadChildOutputBlock(char *blockBuffer, int blockSize, int *readCount
      *  http://www.freebsd.org/cgi/query-pr.cgi?pr=kern/64313
      *
      * When linked with the pthreads library the O_NONBLOCK flag is being reset
-     *  on the jvmOut handle.  Not sure yet of the exact event that is causing
+     *  on the pipedes[PIPE_READ_END] handle.  Not sure yet of the exact event that is causing
      *  this, but once it happens reads will start to block even though calls
-     *  to fcntl(jvmOut, F_GETFL) say that the O_NONBLOCK flag is set.
-     * Calling fcntl(jvmOut, F_SETFL, O_NONBLOCK) again will set the flag back
+     *  to fcntl(pipedes[PIPE_READ_END], F_GETFL) say that the O_NONBLOCK flag is set.
+     * Calling fcntl(pipedes[PIPE_READ_END], F_SETFL, O_NONBLOCK) again will set the flag back
      *  again and cause it to start working correctly.  This may only need to
      *  be done once, however, because F_GETFL does not return the accurate
      *  state there is no reliable way to check.  Be safe and always set the
      *  flag. */
-    if (fcntl(jvmOut, F_SETFL, O_NONBLOCK) < 0) {
+    if (fcntl(pipedes[PIPE_READ_END], F_SETFL, O_NONBLOCK) < 0) {
         log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_ERROR, TEXT(
             "Failed to set JVM output handle to non blocking mode to read child process output: %s (%d)"),
             getLastErrorText(), errno);
@@ -1310,9 +1528,8 @@ int wrapperReadChildOutputBlock(char *blockBuffer, int blockSize, int *readCount
 #endif
 
     /* Fill read buffer. */
-    *readCount = read(jvmOut, blockBuffer, blockSize);
-
-    if (*readCount <= 0) {
+    *readCount = read(pipedes[PIPE_READ_END], blockBuffer, blockSize);
+    if (*readCount < 0) {
         /* No more bytes available, return for now.  But make sure that this was not an error. */
         if (errno == EAGAIN) {
             /* Normal, the call would have blocked as there is no data available. */
@@ -1322,6 +1539,10 @@ int wrapperReadChildOutputBlock(char *blockBuffer, int blockSize, int *readCount
                 getLastErrorText(), errno);
             return TRUE;
         }
+    } else if (*readCount == 0) {
+        /* We reached the EOF.  This means that the other end of the pipe was closed. */
+        close(pipedes[PIPE_READ_END]);
+        pipedes[PIPE_READ_END] = -1;
     }
 
     return FALSE;
@@ -1329,16 +1550,13 @@ int wrapperReadChildOutputBlock(char *blockBuffer, int blockSize, int *readCount
 
 /**
  * Transform a program into a daemon.
- * Inspired by code from GNU monit, which in turn, was
- * inspired by code from Stephen A. Rago's book,
- * Unix System V Network Programming.
  *
  * The idea is to first fork, then make the child a session leader,
  * and then fork again, so that it, (the session group leader), can
  * exit. This means that we, the grandchild, as a non-session group
  * leader, can never regain a controlling terminal.
  */
-void daemonize() {
+void daemonize(int argc, TCHAR** argv) {
     pid_t pid;
     int fd;
 
@@ -1354,7 +1572,7 @@ void daemonize() {
     if ((pid = fork()) < 0) {
         log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_ERROR, TEXT("Could not spawn daemon process: %s"),
             getLastErrorText());
-        appExit(1);
+        appExit(1, argc, argv);
     } else if (pid != 0) {
         /* Intermediate process is now running.  This is the original process, so exit. */
 
@@ -1362,7 +1580,7 @@ void daemonize() {
          * the console output look nice by making sure that all output from the
          * intermediate and daemon threads are complete before this thread exits.
          * Sleep for 0.5 seconds. */
-        wrapperSleep(FALSE, 500);
+        wrapperSleep(500);
 
         /* Call exit rather than appExit as we are only exiting this process. */
         exit(0);
@@ -1372,7 +1590,7 @@ void daemonize() {
     if (setsid() == -1) {
         log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_ERROR, TEXT("setsid() failed: %s"),
            getLastErrorText());
-        appExit(1);
+        appExit(1, argc, argv);
     }
 
     signal(SIGHUP, SIG_IGN); /* don't let future opens allocate controlling terminals */
@@ -1404,7 +1622,7 @@ void daemonize() {
     if ((pid = fork()) < 0) {
         log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_ERROR, TEXT("Could not spawn daemon process: %s"),
             getLastErrorText());
-        appExit(1);
+        appExit(1, argc, argv);
     } else if (pid != 0) {
         /* Daemon process is now running.  This is the intermediate process, so exit. */
         /* Call exit rather than appExit as we are only exiting this process. */
@@ -1412,7 +1630,7 @@ void daemonize() {
     }
 
     /* Restore the auto close flag in the daemonized process. */
-    setLogfileAutoClose(wrapperData->logfileInactivityTimeout <= 0);
+    setLogfileAutoClose(wrapperData->logfileCloseTimeout == 0);
 }
 
 
@@ -1420,11 +1638,11 @@ void daemonize() {
  * Sets the working directory to that of the current executable
  */
 int setWorkingDir(TCHAR *app) {
-    TCHAR szPath[PATH_MAX + 1];
+    TCHAR *szPath;
     TCHAR* pos;
 
     /* Get the full path and filename of this program */
-    if (_trealpath(app, szPath) == NULL) {
+    if ((szPath = findPathOf(app, TEXT("Wrapper binary"))) == NULL) {
         log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_FATAL, TEXT("Unable to get the path for '%s'-%s"),
             app, getLastErrorText());
         return 1;
@@ -1439,6 +1657,7 @@ int setWorkingDir(TCHAR *app) {
     pos = _tcsrchr(szPath, TEXT('/'));
     if (pos == NULL) {
         log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_FATAL, TEXT("Unable to extract path from: %s"), szPath);
+        free(szPath);
         return 1;
     } else {
         /* Clip the path at the position of the last backslash */
@@ -1448,17 +1667,18 @@ int setWorkingDir(TCHAR *app) {
     /* Set a variable to the location of the binary. */
     setEnv(TEXT("WRAPPER_BIN_DIR"), szPath, ENV_SOURCE_WRAPPER);
 
-    if (wrapperSetWorkingDir(szPath)) {
+    if (wrapperSetWorkingDir(szPath, TRUE)) {
+        free(szPath);
         return 1;
     }
-
+    free(szPath);
     return 0;
 }
 
 /*******************************************************************************
  * Main function                                                               *
  *******************************************************************************/
-
+#ifndef CUNIT
 #ifdef UNICODE
 int main(int argc, char **cargv) {
 #else
@@ -1468,7 +1688,6 @@ int main(int argc, char **argv) {
     int i;
 #endif
     TCHAR *retLocale;
-    int localeSet;
 #ifdef UNICODE
     size_t req;
     TCHAR **argv;
@@ -1477,7 +1696,7 @@ int main(int argc, char **argv) {
     argv = malloc(argc * sizeof *argv );
     if(!argv) {
         _tprintf(TEXT("Out of Memory in Main\n"));
-        appExit(1);
+        appExit(1, 0, NULL);
         return 1;
     }
     for (i = 0; i < argc; i++) {
@@ -1489,7 +1708,7 @@ int main(int argc, char **argv) {
                 free(argv[i]);
             }
             free(argv);
-            appExit(1);
+            appExit(1, 0, argv);
             return 1;
         }
         mbstowcs(argv[i], cargv[i], (req + 1) * sizeof(TCHAR));
@@ -1501,7 +1720,6 @@ int main(int argc, char **argv) {
 #if defined(UNICODE)
         free(retLocale);
 #endif
-        localeSet = TRUE;
     } else {
         /* TODO - We need to be careful about LANG here as it is not set on all systems. */
         /*
@@ -1511,10 +1729,9 @@ int main(int argc, char **argv) {
         free(envLang);
 #endif
         */
-        localeSet = FALSE;
     }
     if (wrapperInitialize()) {
-        appExit(1);
+        appExit(1, argc, argv);
         return 1; /* For compiler. */
     }
 
@@ -1528,7 +1745,7 @@ int main(int argc, char **argv) {
     wrapperData->wrapperPID = getpid();
 
     if (setWorkingDir(argv[0])) {
-        appExit(1);
+        appExit(1, argc, argv);
         return 1; /* For compiler. */
     }
 #ifdef _DEBUG
@@ -1540,33 +1757,38 @@ int main(int argc, char **argv) {
 #endif
     /* Parse the command and configuration file from the command line. */
     if (!wrapperParseArguments(argc, argv)) {
-        appExit(1);
+        appExit(1, argc, argv);
         return 1; /* For compiler. */
     }
     wrapperLoadHostName();
+    if (!strcmpIgnoreCase(wrapperData->argCommand, TEXT("-translate"))) {
+        /* We want to disable all log output when a translation request is made. */
+        setSilentLogLevels();
+    }
     /* At this point, we have a command, confFile, and possibly additional arguments. */
     if (!strcmpIgnoreCase(wrapperData->argCommand, TEXT("?")) || !strcmpIgnoreCase(wrapperData->argCommand, TEXT("-help"))) {
         /* User asked for the usage. */
         setSimpleLogLevels();
         wrapperUsage(argv[0]);
-        appExit(0);
+        appExit(0, argc, argv);
         return 0; /* For compiler. */
     } else if (!strcmpIgnoreCase(wrapperData->argCommand, TEXT("v")) || !strcmpIgnoreCase(wrapperData->argCommand, TEXT("-version"))) {
         /* User asked for version. */
         setSimpleLogLevels();
         wrapperVersionBanner();
-        appExit(0);
+        appExit(0, argc, argv);
         return 0; /* For compiler. */
     } else if (!strcmpIgnoreCase(wrapperData->argCommand, TEXT("h")) || !strcmpIgnoreCase(wrapperData->argCommand, TEXT("-hostid"))) {
         /* User asked for version. */
         setSimpleLogLevels();
         wrapperVersionBanner();
         showHostIds(LEVEL_STATUS);
-        appExit(0);
+        appExit(0, argc, argv);
         return 0; /* For compiler. */
     }
+
     /* Load the properties. */
-    if (wrapperLoadConfigurationProperties()) {
+    if (wrapperLoadConfigurationProperties(FALSE)) {
         /* Unable to load the configuration.  Any errors will have already
          *  been reported. */
         if (wrapperData->argConfFileDefault && !wrapperData->argConfFileFound) {
@@ -1574,19 +1796,27 @@ int main(int argc, char **argv) {
              *  it did not exist.  Show the usage. */
             wrapperUsage(argv[0]);
         }
-        appExit(1);
+        appExit(1, argc, argv);
         return 1; /* For compiler. */
     }
 
     /* Set the default umask of the Wrapper process. */
     umask(wrapperData->umask);
-
-    if(!strcmpIgnoreCase(wrapperData->argCommand, TEXT("c")) || !strcmpIgnoreCase(wrapperData->argCommand, TEXT("-console"))) {
+    if (!strcmpIgnoreCase(wrapperData->argCommand, TEXT("-translate"))) {
+        setSimpleLogLevels();
+        /* Print out the string so the caller sees it as its translated output. */
+        _tprintf(TEXT("%s"), argv[2]);
+        appExit(0, argc, argv);
+        return 0; /* For compiler. */
+    } else if (!strcmpIgnoreCase(wrapperData->argCommand, TEXT("c")) || !strcmpIgnoreCase(wrapperData->argCommand, TEXT("-console"))) {
         /* Run as a console application */
 
         /* fork to a Daemonized process if configured to do so. */
         if (wrapperData->daemonize) {
-            daemonize();
+            daemonize(argc, argv);
+            
+            /* We are now daemonized, so mark this as being a service. */
+            wrapperData->isConsole = FALSE;
 
             /* When we daemonize the Wrapper, its PID changes. Because of the
              *  WRAPPER_PID environment variable, we need to set it again here
@@ -1597,22 +1827,22 @@ int main(int argc, char **argv) {
             wrapperData->wrapperPID = getpid();
 
             if (wrapperData->isDebugging) {
-                log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_DEBUG, TEXT("Reloading configuration after daemonization."));
+                log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_DEBUG, TEXT("Reloading configuration."));
             }
-
+    
             /* If the working dir has been changed then we need to restore it before
              *  the configuration can be reloaded.  This is needed to support relative
              *  references to include files. */
             if (wrapperData->workingDir && wrapperData->originalWorkingDir) {
-                if (wrapperSetWorkingDir(wrapperData->originalWorkingDir)) {
+                if (wrapperSetWorkingDir(wrapperData->originalWorkingDir, TRUE)) {
                     /* Failed to restore the working dir.  Shutdown the Wrapper */
-                    appExit(1);
+                    appExit(1, argc, argv);
                     return 1; /* For compiler. */
                 }
             }
-
+    
             /* Load the properties. */
-            if (wrapperLoadConfigurationProperties()) {
+            if (wrapperLoadConfigurationProperties(FALSE)) {
                 /* Unable to load the configuration.  Any errors will have already
                  *  been reported. */
                 if (wrapperData->argConfFileDefault && !wrapperData->argConfFileFound) {
@@ -1620,10 +1850,11 @@ int main(int argc, char **argv) {
                      *  it did not exist.  Show the usage. */
                     wrapperUsage(argv[0]);
                 }
-                appExit(1);
+                appExit(1, argc, argv);
                 return 1; /* For compiler. */
             }
         }
+
 
         /* See if the logs should be rolled on Wrapper startup. */
         if ((getLogfileRollMode() & ROLL_MODE_WRAPPER) ||
@@ -1631,28 +1862,42 @@ int main(int argc, char **argv) {
             rollLogs();
         }
 
+        if (wrapperData->pidFilename) {
+            if (writePidFile(wrapperData->pidFilename, wrapperData->wrapperPID, wrapperData->pidFileUmask, wrapperData->pidFileStrict)) {
+                log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_FATAL,
+                     TEXT("ERROR: Could not write pid file %s: %s"),
+                wrapperData->pidFilename, getLastErrorText());
+                     /* Common wrapper cleanup code. */
+                wrapperDispose();
+#if defined(UNICODE)
+                for (i = 0; i < argc; i++) {
+                    if (argv[i]) {
+                        free(argv[i]);
+                    }
+                }
+                if (argv) {
+                    free(argv);
+                }
+#endif
+                exit(1);
+                return 1; /* For compiler. */
+            }
+        }
+
         /* Write pid and anchor files as requested.  If they are the same file the file is
          *  simply overwritten. */
         if (wrapperData->anchorFilename) {
-            if (writePidFile(wrapperData->anchorFilename, wrapperData->wrapperPID, wrapperData->anchorFileUmask)) {
+            if (writePidFile(wrapperData->anchorFilename, wrapperData->wrapperPID, wrapperData->anchorFileUmask, FALSE)) {
                 log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_FATAL,
                      TEXT("ERROR: Could not write anchor file %s: %s"),
                      wrapperData->anchorFilename, getLastErrorText());
-                appExit(1);
+                appExit(1, argc, argv);
                 return 1; /* For compiler. */
             }
         }
-        if (wrapperData->pidFilename) {
-            if (writePidFile(wrapperData->pidFilename, wrapperData->wrapperPID, wrapperData->pidFileUmask)) {
-                log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_FATAL,
-                     TEXT("ERROR: Could not write pid file %s: %s"),
-                     wrapperData->pidFilename, getLastErrorText());
-                appExit(1);
-                return 1; /* For compiler. */
-            }
-        }
+
         if (wrapperData->lockFilename) {
-            if (writePidFile(wrapperData->lockFilename, wrapperData->wrapperPID, wrapperData->lockFileUmask)) {
+            if (writePidFile(wrapperData->lockFilename, wrapperData->wrapperPID, wrapperData->lockFileUmask, FALSE)) {
                 /* This will fail if the user is running as a user without full privileges.
                  *  To make things easier for user configuration, this is ignored if sufficient
                  *  privileges do not exist. */
@@ -1663,15 +1908,20 @@ int main(int argc, char **argv) {
             }
         }
 
-        appExit(wrapperRunConsole());
+        if (wrapperData->isConsole) {
+            appExit(wrapperRunConsole(), argc, argv);
+        } else {
+            appExit(wrapperRunService(), argc, argv);
+        }
         return 0; /* For compiler. */
     } else {
         log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_WARN, TEXT(""));
         log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_WARN, TEXT("Unrecognized option: -%s"), wrapperData->argCommand);
         wrapperUsage(argv[0]);
-        appExit(1);
+        appExit(1, argc, argv);
         return 1; /* For compiler. */
     }
 }
+#endif
 
 #endif /* ifndef WIN32 */

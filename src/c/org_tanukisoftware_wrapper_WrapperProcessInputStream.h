@@ -9,6 +9,7 @@ extern "C" {
 #endif
 #undef org_tanukisoftware_wrapper_WrapperProcessInputStream_SKIP_BUFFER_SIZE
 #define org_tanukisoftware_wrapper_WrapperProcessInputStream_SKIP_BUFFER_SIZE 2048L
+/* Inaccessible static: skipBuffer */
 /*
  * Class:     org_tanukisoftware_wrapper_WrapperProcessInputStream
  * Method:    nativeRead

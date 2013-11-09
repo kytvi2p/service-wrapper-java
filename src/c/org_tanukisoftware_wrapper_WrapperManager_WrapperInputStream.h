@@ -7,8 +7,8 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-#undef org_tanukisoftware_wrapper_WrapperManager_WrapperInputStream_SKIP_BUFFER_SIZE
-#define org_tanukisoftware_wrapper_WrapperManager_WrapperInputStream_SKIP_BUFFER_SIZE 2048L
+#undef org_tanukisoftware_wrapper_WrapperManager_WrapperInputStream_MAX_SKIP_BUFFER_SIZE
+#define org_tanukisoftware_wrapper_WrapperManager_WrapperInputStream_MAX_SKIP_BUFFER_SIZE 2048L
 #ifdef __cplusplus
 }
 #endif

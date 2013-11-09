@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999, 2010 Tanuki Software, Ltd.
+ * Copyright (c) 1999, 2013 Tanuki Software, Ltd.
  * http://www.tanukisoftware.com
  * All rights reserved.
  *
@@ -29,6 +29,8 @@
 
 #ifndef _PROPERTY_H
 #define _PROPERTY_H
+
+#include "wrapper_hashmap.h"
 
 #ifndef TRUE
 #define TRUE -1
@@ -62,18 +64,23 @@ extern EnvSrc *baseEnvSrc;
 
 typedef struct Property Property;
 struct Property {
-    TCHAR *name;              /* The name of the property. */
-    TCHAR *value;             /* The value of the property. */
+    TCHAR *name;             /* The name of the property. */
+    TCHAR *value;            /* The value of the property. */
     int finalValue;          /* TRUE if the Property can not be changed. */
     int quotable;            /* TRUE if quotes can be optionally added around the value. */
+    int internal;            /* TRUE if the Property is internal. */
     Property *next;          /* Pointer to the next Property in a linked list */
     Property *previous;      /* Pointer to the next Property in a linked list */
 };
 
 typedef struct Properties Properties;
 struct Properties {
+    int debugProperties;     /* TRUE if debug information on Properties should be shown. */
+    int logWarnings;         /* Flag that controls whether or not warnings will be logged. */
+    int logWarningLogLevel;  /* Log level at which any log warnings will be logged. */
     Property *first;         /* Pointer to the first property. */
     Property *last;          /* Pointer to the last property.  */
+    PHashMap warnedVarMap;   /* Map of undefined environment variables for which the user was warned. */
 };
 
 /**
@@ -94,8 +101,14 @@ extern int setEnv(const TCHAR *name, const TCHAR *value, int source);
 /**
  * Create a Properties structure loaded in from the specified file.
  *  Must call disposeProperties to free up allocated memory.
+ *
+ * @param properties Properties structure to load into.
+ * @param filename File to load the properties from.
+ * @param preload TRUE if this is a preload call that should have supressed error output.
+ *
+ * @return TRUE if there were any problems, FALSE if successful.
  */
-extern int loadProperties(Properties *properties, const TCHAR* filename);
+extern int loadProperties(Properties *properties, const TCHAR* filename, int preload);
 
 /**
  * Create a Properties structure.  Must call disposeProperties to free up
@@ -108,6 +121,12 @@ extern Properties* createProperties();
  *  pointer will no longer be valid.
  */
 extern void disposeProperties(Properties *properties);
+
+/**
+ * Free all memory allocated by a Properties structure.  The properties
+ *  pointer will no longer be valid.
+ */
+extern void disposeEnvironment();
 
 /**
  * Remove a single Property from a Properties.  All associated memory is
@@ -140,24 +159,35 @@ extern int isEscapedProperty(const TCHAR *propertyName);
  * Adds a single property to the properties structure.
  *
  * @param properties Properties structure to add to.
+ * @param filename Name of the file from which the property was loaded.  NULL, if not from a file.
+ * @param lineNum Line number of the property declaration in the file.  Ignored if filename is NULL.
  * @param propertyName Name of the new Property.
  * @param propertyValue Initial property value.
- * @param finalValue True if the property should be set as static.
- * @param quotable True if the property could contain quotes.
- * @param escapable True if the propertyValue can be escaped if its propertyName
+ * @param finalValue TRUE if the property should be set as static.
+ * @param quotable TRUE if the property could contain quotes.
+ * @param escapable TRUE if the propertyValue can be escaped if its propertyName
  *                  is in the list set with setEscapableProperties().
+ * @param internal TRUE if the property is a Wrapper internal property.
  *
  * @return The newly created Property, or NULL if there was a reported error.
  */
-extern Property* addProperty(Properties *properties, const TCHAR *propertyName, const TCHAR *propertyValue, int finalValue, int quotable, int escapable, int internal);
+extern Property* addProperty(Properties *properties, const TCHAR* filename, int lineNum, const TCHAR *propertyName, const TCHAR *propertyValue, int finalValue, int quotable, int escapable, int internal);
 
 /**
  * Takes a name/value pair in the form <name>=<value> and attempts to add
  * it to the specified properties table.
  *
+ * @param properties Properties structure to add to.
+ * @param filename Name of the file from which the property was loaded.  NULL, if not from a file.
+ * @param lineNum Line number of the property declaration in the file.  Ignored if filename is NULL.
+ * @param propertyNameValue The "name=value" pair to create the property from.
+ * @param finalValue TRUE if the property should be set as static.
+ * @param quotable TRUE if the property could contain quotes.
+ * @param internal TRUE if the property is a Wrapper internal property.
+ *
  * Returns 0 if successful, otherwise 1
  */
-extern int addPropertyPair(Properties *properties, const TCHAR *propertyNameValue, int finalValue, int quotable, int internal);
+extern int addPropertyPair(Properties *properties, const TCHAR* filename, int lineNum, const TCHAR *propertyNameValue, int finalValue, int quotable, int internal);
 
 extern const TCHAR* getStringProperty(Properties *properties, const TCHAR *propertyName, const TCHAR *defaultValue);
 
@@ -167,15 +197,24 @@ extern const TCHAR* getFileSafeStringProperty(Properties *properties, const TCHA
  * Returns a sorted array of all properties beginning with {propertyNameBase}.
  *  Only numerical characters can be returned between the two.
  *
+ * The calling code must always call freeStringProperties to make sure that the
+ *  malloced propertyNames, propertyValues, and propertyIndices arrays are freed
+ *  up correctly.  This is only necessary if the function returns 0.
+ *
  * @param properties The full properties structure.
  * @param propertyNameHead All matching properties must begin with this value.
+ * @param propertyNameTail All matching properties must end with this value.
  * @param all If FALSE then the array will start with #1 and loop up until the
  *            next property is not found, if TRUE then all properties will be
  *            returned, even if there are gaps in the series.
+ * @param matchAny If FALSE only numbers are allowed as placeholder
  * @param propertyNames Returns a pointer to a NULL terminated array of
  *                      property names.
  * @param propertyValues Returns a pointer to a NULL terminated array of
  *                       property values.
+ * @param propertyIndices Returns a pointer to a 0 terminated array of
+ *                        the index numbers used in each property name of
+ *                        the propertyNames array.
  *
  * @return 0 if successful, -1 if there was an error.
  */
@@ -186,8 +225,6 @@ extern int getStringProperties(Properties *properties, const TCHAR *propertyName
  */
 extern void freeStringProperties(TCHAR **propertyNames, TCHAR **propertyValues, long unsigned int *propertyIndices);
 
-extern int checkPropertyEqual(Properties *properties, const TCHAR *propertyName, const TCHAR *defaultValue, const TCHAR *value);
-
 extern int getIntProperty(Properties *properties, const TCHAR *propertyName, int defaultValue);
 
 extern int getBooleanProperty(Properties *properties, const TCHAR *propertyName, int defaultValue);
@@ -195,6 +232,26 @@ extern int getBooleanProperty(Properties *properties, const TCHAR *propertyName,
 extern int isQuotableProperty(Properties *properties, const TCHAR *propertyName);
 
 extern void dumpProperties(Properties *properties);
+
+/**
+ * Set to TRUE if warnings about property values should be logged.
+ */
+extern void setLogPropertyWarnings(Properties *properties, int logWarnings);
+
+/**
+ * Level at which any property warnings are logged.
+ */
+extern void setLogPropertyWarningLogLevel(Properties *properties, int logLevel);
+
+/**
+ * Returns the minimum value. This is used in place of the __min macro when the parameters should not be called more than once.
+ */
+extern int propIntMin(int value1, int value2);
+
+/**
+ * Returns the maximum value. This is used in place of the __max macro when the parameters should not be called more than once.
+ */
+extern int propIntMax(int value1, int value2);
 
 /** Creates a linearized representation of all of the properties.
  *  The returned buffer must be freed by the calling code. */

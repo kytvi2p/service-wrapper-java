@@ -1,7 +1,7 @@
 package org.tanukisoftware.wrapper;
 
 /*
- * Copyright (c) 1999, 2010 Tanuki Software, Ltd.
+ * Copyright (c) 1999, 2013 Tanuki Software, Ltd.
  * http://www.tanukisoftware.com
  * All rights reserved.
  *
@@ -49,6 +49,16 @@ import java.lang.reflect.Modifier;
  *  for up to 5 minutes for the startup main method to complete, set
  *  the property to 300 as follows (defaults to 2 seconds):
  *  -Dorg.tanukisoftware.wrapper.WrapperStartStopApp.maxStartMainWait=300
+ * <p>
+ * By default, the WrapperStartStopApp will tell the Wrapper to exit with an
+ *  exit code of 1 if any uncaught exceptions are thrown in the configured
+ *  main method.  This is good in most cases, but is a little different than
+ *  the way Java works on its own.  Java will stay up and running if it has
+ *  launched any other non-daemon threads even if the main method ends because
+ *  of an uncaught exception.  To get this same behavior, it is possible to
+ *  specify the following system property when launching the JVM (defaults to
+ *  FALSE):
+ *  -Dorg.tanukisoftware.wrapper.WrapperStartStopApp.ignoreMainExceptions=TRUE
  * <p>
  * It is possible to extend this class but make absolutely sure that any
  *  overridden methods call their super method or the class will fail to
@@ -125,6 +135,11 @@ public class WrapperStartStopApp
      * Exit code to be returned if the application fails to start.
      */
     private Integer m_mainExitCode;
+    
+    /**
+     * True if uncaught exceptions in the user app's main method should be ignored.
+     */
+    private boolean m_ignoreMainExceptions;
     
     /**
      * Flag used to signify that the start method has completed.
@@ -241,7 +256,24 @@ public class WrapperStartStopApp
             {
                 m_outDebug.println( WrapperManager.getRes().getString( "invoking start main method" ) );
             }
-            m_startMainMethod.invoke( null, new Object[] { m_startMainArgs } );
+            
+            try
+            {
+                try
+                {
+                    m_startMainMethod.invoke( null, new Object[] { m_startMainArgs } );
+                }
+                catch ( IllegalArgumentException iae )
+                {
+                    m_startMainMethod.invoke( null, new Object[] { } ); 
+                }
+            }
+            finally
+            {
+                // Make sure the rest of this thread does not fall behind the application.
+                Thread.currentThread().setPriority( Thread.MAX_PRIORITY );
+            }
+            
             if ( WrapperManager.isDebugEnabled() )
             {
                 m_outDebug.println( WrapperManager.getRes().getString( "start main method completed" ) );
@@ -285,21 +317,34 @@ public class WrapperStartStopApp
         // their app threw.
         t.printStackTrace( m_outError );
 
-        synchronized(this)
+        synchronized( this )
         {
-            if ( m_startComplete )
+            if ( m_ignoreMainExceptions )
             {
-                // Shut down here.
-                WrapperManager.stop( 1 );
-                return; // Will not get here.
+                if ( !m_startComplete )
+                {
+                    // An exception was thrown, but we want to let the application continue.
+                    m_mainComplete = true;
+                    this.notifyAll();
+                }
+                return;
             }
             else
             {
-                // Let start method handle shutdown.
-                m_mainComplete = true;
-                m_mainExitCode = new Integer( 1 );
-                this.notifyAll();
-                return;
+                if ( m_startComplete )
+                {
+                    // Shut down here.
+                    WrapperManager.stop( 1 );
+                    return; // Will not get here.
+                }
+                else
+                {
+                    // Let start method handle shutdown.
+                    m_mainComplete = true;
+                    m_mainExitCode = new Integer( 1 );
+                    this.notifyAll();
+                    return;
+                }
             }
         }
     }
@@ -321,6 +366,8 @@ public class WrapperStartStopApp
         // Decide whether or not to wait for the start main method to complete before returning.
         boolean waitForStartMain = WrapperSystemPropertyUtil.getBooleanProperty(
             WrapperStartStopApp.class.getName() + ".waitForStartMain", false );
+        m_ignoreMainExceptions = WrapperSystemPropertyUtil.getBooleanProperty(
+            WrapperStartStopApp.class.getName() + ".ignoreMainExceptions", false );
         int maxStartMainWait = WrapperSystemPropertyUtil.getIntProperty(
             WrapperStartStopApp.class.getName() + ".maxStartMainWait", 2 );
         maxStartMainWait = Math.max( 1, maxStartMainWait ); 
@@ -352,6 +399,9 @@ public class WrapperStartStopApp
         {
             m_startMainArgs = args;
             mainThread.start();
+            
+            // Make sure the rest of this thread does not fall behind the application.
+            Thread.currentThread().setPriority( Thread.MAX_PRIORITY );
             
             // To avoid problems with the main thread starting slowly on heavily loaded systems,
             //  do not continue until the thread has actually started.
@@ -402,7 +452,7 @@ public class WrapperStartStopApp
             {
                 m_outDebug.println( WrapperManager.getRes().getString(
                         "start(args) end.  Main Completed={0}, exitCode={1}",
-                        new Boolean(m_mainComplete), m_mainExitCode ) );
+                        new Boolean( m_mainComplete ), m_mainExitCode ) );
             }
             return m_mainExitCode;
         }
@@ -426,7 +476,16 @@ public class WrapperStartStopApp
             {
                 m_outDebug.println( WrapperManager.getRes().getString( "invoking stop main method" ) );
             }
-            m_stopMainMethod.invoke( null, new Object[] { m_stopMainArgs } );
+
+            try
+            {
+                m_stopMainMethod.invoke( null, new Object[] { m_stopMainArgs } );
+            }
+            catch ( IllegalArgumentException iae )
+            {
+                m_stopMainMethod.invoke( null, new Object[] { } ); 
+            }
+            
             if ( WrapperManager.isDebugEnabled() )
             {
                 m_outDebug.println( WrapperManager.getRes().getString( "stop main method completed" ) );
@@ -578,6 +637,13 @@ public class WrapperStartStopApp
     {
         // Look for the start class by name
         Class mainClass;
+        String methodName = "main";
+        String [] arr = className.split("/");
+        if ( arr.length > 1 )
+        {
+            className = arr[0];
+            methodName = arr[1];
+        }
         try
         {
             mainClass = Class.forName( className );
@@ -607,26 +673,39 @@ public class WrapperStartStopApp
         }
         
         // Look for the start method
-        Method mainMethod;
+        Method mainMethod = null;
         try
         {
             // getDeclaredMethod will return any method named main in the specified class,
             //  while getMethod will only return public methods, but it will search up the
             //  inheritance path.
-            mainMethod = mainClass.getMethod( "main", new Class[] { String[].class } );
+            mainMethod = mainClass.getMethod( methodName, new Class[] { String[].class } );
         }
         catch ( NoSuchMethodException e )
         {
-            m_outError.println( WrapperManager.getRes().getString(
-                    "Unable to locate a public static main method in class {0}: {1}", className, e ) );
-            showUsage();
-            WrapperManager.stop( 1 );
-            return null;  // Will not get here
+            try
+            {
+            // getDeclaredMethod will return any method named <methodname> in the specified class,
+            // while getMethod will only return public methods, but it will search up the
+            // inheritance path.
+            // try without parameters
+                mainMethod = mainClass.getMethod( methodName, new Class[] { } );
+            }
+            catch ( NoSuchMethodException e2 )
+            {
+            }
+            if ( mainMethod == null ) {
+                m_outError.println( WrapperManager.getRes().getString(
+                        "Unable to locate a public static {2} method in class {0}: {1}", className, e, methodName ) );
+                showUsage();
+                WrapperManager.stop( 1 );
+                return null;  // Will not get here
+            }
         }
         catch ( SecurityException e )
         {
             m_outError.println( WrapperManager.getRes().getString(
-                    "Unable to locate a public static main method in class {0}: {1}", className, e ) );
+                    "Unable to locate a public static {2} method in class {0}: {1}", className, e, methodName ) );
             showUsage();
             WrapperManager.stop( 1 );
             return null;  // Will not get here
@@ -637,8 +716,8 @@ public class WrapperStartStopApp
         if ( !( Modifier.isPublic( modifiers ) && Modifier.isStatic( modifiers ) ) )
         {
             m_outError.println( WrapperManager.getRes().getString(
-                    "The main method in class {0} must be declared public and static.",
-                     className  ) );
+                    "The {1} method in class {0} must be declared public and static.",
+                     className, methodName ) );
             showUsage();
             WrapperManager.stop( 1 );
             return null;  // Will not get here
@@ -700,7 +779,7 @@ public class WrapperStartStopApp
         System.out.println( WrapperManager.getRes().getString(
             "WrapperStartStopApp Usage:" ) );
         System.out.println( WrapperManager.getRes().getString(
-            "  java org.tanukisoftware.wrapper.WrapperStartStopApp {start_class} {start_arg_count} [start_arguments] {stop_class} {stop_wait} {stop_arg_count} [stop_arguments]" ) );
+            "  java org.tanukisoftware.wrapper.WrapperStartStopApp {start_class{/start_method}} {start_arg_count} [start_arguments] {stop_class{/stop_method}} {stop_wait} {stop_arg_count} [stop_arguments]" ) );
         System.out.println();
         System.out.println( WrapperManager.getRes().getString(
             "Where:" ) );

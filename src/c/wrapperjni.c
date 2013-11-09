@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999, 2010 Tanuki Software, Ltd.
+ * Copyright (c) 1999, 2013 Tanuki Software, Ltd.
  * http://www.tanukisoftware.com
  * All rights reserved.
  *
@@ -31,10 +31,12 @@
 #include <string.h>
 #include <errno.h>
 #include <stdlib.h>
-
+#include <fcntl.h>
 #ifdef WIN32
  #include <windows.h>
  #include <tchar.h>
+ #include <io.h>
+ #define dup2 _dup2
 #endif
 #include "wrapper_i18n.h"
 #include "wrapperinfo.h"
@@ -47,29 +49,41 @@ int controlEventQueue[CONTROL_EVENT_QUEUE_SIZE];
 int controlEventQueueLastReadIndex = 0;
 int controlEventQueueLastWriteIndex = 0;
 
+
+/** Flag to keep track of whether StdOut has been redirected. */
+int redirectedStdOut = FALSE;
+
+/** Flag to keep track of whether StdErr has been redirected. */
+int redirectedStdErr = FALSE;
+
+/* Special symbols that need to be defined manually as part of the bootstrap process. */
 const char utf8ClassJavaLangString[] = {106, 97,118, 97, 47, /* java/ */
                                         108, 97,110,103, 47, /* lang/ */
                                         83,116,114,105,110,103, 0}; /* "java/lang/String" */
 const char utf8MethodInit[] = {60,105,110,105,116, 62, 0}; /* "<init>" */
 const char utf8Sig_BrV[] = {40, 91, 66, 41, 86, 0}; /* "([B)V" */
-const char utf8Sigr_B [] = { 40, 41, 91, 66, 0}; /* "()[B") */
+const char utf8Sigr_B[] = { 40, 41, 91, 66, 0}; /* "()[B") */
 const char utf8MethodGetBytes[] = {103, 101, 116, 66, 121, 116, 101, 115, 0}; /* getBytes */
 const char utf8ClassJavaLangOutOfMemoryError[] = {106, 97,118, 97, 47, /* java/ */
                                                   108, 97,110, 103, 47, /* lang/ */
                                                   79, 117, 116, 79, 102, 77, 101, 109, 111, 114, 121, 69, 114, 114, 111, 114, 0}; /* OutOfMemoryError */
-const char utf8SigJ[] = {74, 0}; /* "J" */
-const char utf8VrV[] = {40, 41, 86, 0}; /* "()V" */
-const char utf8SigmId[] = { 109, 95, 73, 100, 0}; /* "m_Id" */
-const char utf8SigOrgTanukisoftwareWrapperWrapperResources[] = {111, 114, 103, 47, /* org/ */
+const char utf8ClassOrgTanukisoftwareWrapperWrapperJNIError[] = {111, 114, 103, 47, /* org/ */
                                                                 116, 97, 110, 117, 107, 105, 115, 111, 102, 116, 119, 97, 114, 101, 47, /* tanukisoftware/ */
                                                                 119, 114, 97, 112, 112, 101, 114, 47, /* wrapper/ */
-                                                                87,  114, 97, 112, 112, 101, 114, 82, 101, 115, 111, 117, 114, 99, 101, 115, 0}; /* "WrapperResources" */
+                                                                87,  114, 97, 112, 112, 101, 114, 74, 78, 73, 69, 114, 114, 111, 114, 0}; /* "WrapperJNIError" */
+
 /*
  * For UTF8 constants, '_' in the name means an array, 'r' preceeds the return
  *  portion of a method declaration, 'V' is Void.  The rest is like the
  *  Java format.
  */
-char *utf8ClassJavaLangError;
+char *utf8SigLjavaLangStringrV;
+char *utf8ClassJavaLangSystem;
+char *utf8MethodGetProperties;
+char *utf8SigVrLjavaUtilProperties;
+char *utf8MethodGetProperty;
+char *utf8SigLjavaLangStringrLjavaLangString;
+
 #ifdef WIN32
 #else
 char *utf8ClassOrgTanukisoftwareWrapperWrapperUNIXUser;
@@ -79,12 +93,47 @@ char *utf8SigIIStringStringStringStringrV;
 char *utf8SigIStringrV;
 #endif
 
-char *utf8SigLjavaLangStringrV;
-char *utf8ClassJavaLangSystem;
-char *utf8MethodGetProperties;
-char *utf8SigVrLjavaUtilProperties;
-char *utf8MethodGetProperty;
-char *utf8SigLjavaLangStringrLjavaLangString;
+
+
+/**
+ * Cause the current thread to sleep for the specified number of milliseconds.
+ *  Sleeps over one second are not allowed.
+ *
+ * @param ms Number of milliseconds to wait for.
+ *
+ * @return TRUE if the was interrupted, FALSE otherwise.  Neither is an error.
+ */
+int wrapperSleep(int ms) {
+#ifdef WIN32
+    Sleep(ms);
+#else
+    /* We want to use nanosleep if it is available, but make it possible for the
+       user to build a version that uses usleep if they want.
+       usleep does not behave nicely with signals thrown while sleeping.  This
+       was the believed cause of a hang experienced on one Solaris system. */
+#ifdef USE_USLEEP
+    usleep(ms * 1000); /* microseconds */
+#else
+    struct timespec ts;
+
+    if (ms >= 1000) {
+        ts.tv_sec = (ms * 1000000) / 1000000000;
+        ts.tv_nsec = (ms * 1000000) % 1000000000; /* nanoseconds */
+    } else {
+        ts.tv_sec = 0;
+        ts.tv_nsec = ms * 1000000; /* nanoseconds */
+    }
+    if (nanosleep(&ts, NULL)) {
+        if (errno == EINTR) {
+            return TRUE;
+        } else if (errno == EAGAIN) {
+            return TRUE;
+        }
+    }
+#endif
+#endif
+    return FALSE;
+}
 
 /**
  * Create an error message from GetLastError() using the
@@ -113,8 +162,9 @@ TCHAR* getLastErrorText() {
         _sntprintf( lastErrBuf, 1024, TEXT("%s (0x%x)"), lpszTemp, GetLastError());
     }
 
+    /* following the documentation of FormatMessage, LocalFree should be called to free the output buffer. */
     if (lpszTemp) {
-        GlobalFree((HGLOBAL) lpszTemp);
+        LocalFree(lpszTemp);
     }
 
     return lastErrBuf;
@@ -171,7 +221,7 @@ jstring JNU_NewStringNative(JNIEnv *env, const TCHAR *strW) {
     len = _tcslen(strW);
     if (len > 0) {
  #ifdef WIN32
-        size = WideCharToMultiByte(CP_OEMCP, 0, strW, -1, NULL, 0, NULL, NULL);
+        size = WideCharToMultiByte(CP_UTF8, 0, strW, -1, NULL, 0, NULL, NULL);
         if (size == 0) {
             /* Failed. */
             _tprintf(TEXT("WrapperJNI Warn: Failed to convert string \"%s\": %s\n"), strW, GetLastError()); fflush(NULL);
@@ -182,7 +232,10 @@ jstring JNU_NewStringNative(JNIEnv *env, const TCHAR *strW) {
             throwOutOfMemoryError(env, TEXT("JNSN1"));
             return NULL;
         }
-        WideCharToMultiByte(CP_OEMCP, 0, strW, -1, msgMB, size, NULL, NULL);
+        WideCharToMultiByte(CP_UTF8, 0, strW, -1, msgMB, size, NULL, NULL);
+        result = (*env)->NewStringUTF(env, msgMB);
+        free(msgMB);
+        return result;
  #else
         size = wcstombs(NULL, strW, 0) + 1;
         msgMB = malloc(sizeof(char) * size);
@@ -207,6 +260,11 @@ jstring JNU_NewStringNative(JNIEnv *env, const TCHAR *strW) {
     result = NULL;
     if ((*env)->EnsureLocalCapacity(env, 2) < 0) {
         throwOutOfMemoryError(env, TEXT("JNSN4"));
+#ifdef UNICODE
+        if (msgMB) {
+            free(msgMB);
+        }
+#endif
         return NULL; /* out of memory error */
     }
     len = strlen(msgMB);
@@ -215,26 +273,20 @@ jstring JNU_NewStringNative(JNIEnv *env, const TCHAR *strW) {
         if ((jClassString = (*env)->FindClass(env, utf8ClassJavaLangString))) {
             if ((MID_String_init = (*env)->GetMethodID(env, jClassString, utf8MethodInit, utf8Sig_BrV))) {
                 result = (*env)->NewObject(env, jClassString, MID_String_init, jBytes);
-            } else {
-                /* Exception Thrown */
             }
-            
+
             (*env)->DeleteLocalRef(env, jClassString);
-        } else {
-            /* Exception Thrown */
         }
-        
+
         (*env)->DeleteLocalRef(env, jBytes);
-    } else {
-        /* Exception Thrown */
     }
-    
+
 #ifdef UNICODE
     if (msgMB) {
         free(msgMB);
     }
 #endif
-    
+
     return result;
 }
 
@@ -275,7 +327,6 @@ void JNU_SetByteArrayRegion(JNIEnv *env, jbyteArray* jarray, jsize start, jsize 
  */
 TCHAR *JNU_GetStringNativeChars(JNIEnv *env, jstring jstr) {
     jbyteArray jByteArrayBytes = 0;
-    jthrowable jThrowableE;
     jclass jClassString = NULL;
     jmethodID jMethodIdStringGetBytes = NULL;
 #ifdef UNICODE
@@ -288,23 +339,21 @@ TCHAR *JNU_GetStringNativeChars(JNIEnv *env, jstring jstr) {
         throwOutOfMemoryError(env, TEXT("GSNC1"));
         return NULL; /* out of memory error */
     }
-    if ((jClassString = (*env)->FindClass(env, utf8ClassJavaLangString)) != NULL &&
-            (jMethodIdStringGetBytes = (*env)->GetMethodID(env, jClassString, utf8MethodGetBytes, utf8Sigr_B)) != NULL){
-        jByteArrayBytes = (*env)->CallObjectMethod(env, jstr, jMethodIdStringGetBytes);
-        jThrowableE = (*env)->ExceptionOccurred(env);
-        if (!jThrowableE) {
-            jint len = (*env)->GetArrayLength(env, jByteArrayBytes);
-            result = (char *)malloc(sizeof(char) * (len + 1));
-            if (!result) {
-                throwOutOfMemoryError(env, TEXT("GSNC2"));
-            } else {
-                (*env)->GetByteArrayRegion(env, jByteArrayBytes, 0, len, (jbyte *)result);
-                result[len] = 0; /* NULL-terminate */
+    if ((jClassString = (*env)->FindClass(env, utf8ClassJavaLangString)) != NULL) {
+        if ((jMethodIdStringGetBytes = (*env)->GetMethodID(env, jClassString, utf8MethodGetBytes, utf8Sigr_B)) != NULL) {
+            if ((jByteArrayBytes = (*env)->CallObjectMethod(env, jstr, jMethodIdStringGetBytes)) != NULL) {
+                jint len = (*env)->GetArrayLength(env, jByteArrayBytes);
+                result = (char *)malloc(sizeof(char) * (len + 1));
+                if (!result) {
+                    throwOutOfMemoryError(env, TEXT("GSNC2"));
+                } else {
+                    (*env)->GetByteArrayRegion(env, jByteArrayBytes, 0, len, (jbyte *)result);
+                    result[len] = 0; /* NULL-terminate */
+                }
+                
+                (*env)->DeleteLocalRef(env, jByteArrayBytes);
             }
-        } else {
-            (*env)->DeleteLocalRef(env, jThrowableE);
         }
-        (*env)->DeleteLocalRef(env, jByteArrayBytes);
         (*env)->DeleteLocalRef(env, jClassString);
     }
 #ifdef UNICODE
@@ -312,6 +361,7 @@ TCHAR *JNU_GetStringNativeChars(JNIEnv *env, jstring jstr) {
     size = MultiByteToWideChar(CP_OEMCP, 0, result, -1, NULL, 0);
     tresult = malloc(size*sizeof(LPWSTR));
     if (!tresult) {
+        free(result);
         throwOutOfMemoryError(env, TEXT("GSNC3"));
         return NULL;
     }
@@ -319,10 +369,10 @@ TCHAR *JNU_GetStringNativeChars(JNIEnv *env, jstring jstr) {
     free(result);
     return tresult;
 #else
-    size = mbstowcs(NULL, result, 0) + 1;
-    size *= sizeof(TCHAR);
+    size = (mbstowcs(NULL, result, 0) + 1) * sizeof(TCHAR);
     tresult = malloc(size);
     if (!tresult) {
+        free(result);
         throwOutOfMemoryError(env, TEXT("GSNC3"));
         return NULL;
     }
@@ -342,19 +392,24 @@ jstring JNU_NewStringFromNativeChar(JNIEnv *env, const char *str) {
     jbyteArray bytes = 0;
     size_t len;
 
-
     result = NULL;
     if ((*env)->EnsureLocalCapacity(env, 2) < 0) {
         throwOutOfMemoryError(env, TEXT("JNSN2"));
         return NULL; /* out of memory error */
     }
+    
     len = strlen(str);
     bytes = (*env)->NewByteArray(env, (jsize)len);
     if (bytes != NULL) {
         (*env)->SetByteArrayRegion(env, bytes, 0, (jsize)len,(jbyte*) str);
-        jClassString = (*env)->FindClass(env, utf8ClassJavaLangString);
-        MID_String_init = (*env)->GetMethodID(env, jClassString, utf8MethodInit, utf8Sig_BrV);
-        result = (*env)->NewObject(env, jClassString, MID_String_init, bytes);
+        if ((jClassString = (*env)->FindClass(env, utf8ClassJavaLangString)) != NULL) {
+            if ((MID_String_init = (*env)->GetMethodID(env, jClassString, utf8MethodInit, utf8Sig_BrV)) != NULL) {
+                result = (*env)->NewObject(env, jClassString, MID_String_init, bytes);
+            }
+            
+            (*env)->DeleteLocalRef(env, jClassString);
+        }
+        
         (*env)->DeleteLocalRef(env, bytes);
 
     } /* else fall through */
@@ -379,32 +434,34 @@ char *getUTF8Chars(JNIEnv *env, const char *nativeChars) {
         utf8Chars = malloc(jlen + 1);
         if (!utf8Chars) {
             throwOutOfMemoryError(env, TEXT("GUTFC1"));
-            return NULL;
-        }
-
-        stringChars = ((*env)->GetStringUTFChars(env, js, &isCopy));
-        if (stringChars != NULL) {
-            memcpy(utf8Chars, stringChars, jlen);
-            utf8Chars[jlen] = '\0';
-
-            (*env)->ReleaseStringUTFChars(env, js, stringChars);
         } else {
-            throwOutOfMemoryError(env, TEXT("GUTFC2"));
-            free(utf8Chars);
-            return NULL;
+            stringChars = ((*env)->GetStringUTFChars(env, js, &isCopy));
+            if (stringChars != NULL) {
+                memcpy(utf8Chars, stringChars, jlen);
+                utf8Chars[jlen] = '\0';
+    
+                (*env)->ReleaseStringUTFChars(env, js, stringChars);
+            } else {
+                throwOutOfMemoryError(env, TEXT("GUTFC2"));
+                free(utf8Chars);
+                utf8Chars = NULL;
+            }
         }
+        
         (*env)->DeleteLocalRef(env, js);
     }
     return utf8Chars;
 }
 
 void initUTF8Strings(JNIEnv *env) {
-    /* Now do the rest of the strings using our helper function. */
-    /*utf8ClassJavaLangOutOfMemoryError = getUTF8Chars(env, "java/lang/OutOfMemoryError"); */
-    utf8ClassJavaLangError = getUTF8Chars(env, "java/lang/Error");
-    /* utf8MethodGetBytes = getUTF8Chars(env, "getBytes"); */
+    /* Now initialize all of the strings using our helper function. */
     utf8SigLjavaLangStringrV = getUTF8Chars(env, "(Ljava/lang/String;)V");
-    /* utf8Sigr_B = getUTF8Chars(env, "()[B"); */
+    utf8ClassJavaLangSystem = getUTF8Chars(env, "java/lang/System");
+    utf8MethodGetProperties = getUTF8Chars(env, "getProperties");
+    utf8SigVrLjavaUtilProperties = getUTF8Chars(env, "()Ljava/util/Properties;");
+    utf8MethodGetProperty = getUTF8Chars(env, "getProperty");
+    utf8SigLjavaLangStringrLjavaLangString = getUTF8Chars(env, "(Ljava/lang/String;)Ljava/lang/String;");
+    
 #ifdef WIN32
 #else
     utf8ClassOrgTanukisoftwareWrapperWrapperUNIXUser = getUTF8Chars(env, "org/tanukisoftware/wrapper/WrapperUNIXUser");
@@ -412,12 +469,7 @@ void initUTF8Strings(JNIEnv *env) {
     utf8MethodAddGroup = getUTF8Chars(env, "addGroup");
     utf8SigIIStringStringStringStringrV = getUTF8Chars(env, "(IILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V");
     utf8SigIStringrV = getUTF8Chars(env, "(ILjava/lang/String;)V");
-#endif
-    utf8ClassJavaLangSystem = getUTF8Chars(env, "java/lang/System");
-    utf8MethodGetProperties = getUTF8Chars(env, "getProperties");
-    utf8SigVrLjavaUtilProperties = getUTF8Chars(env, "()Ljava/util/Properties;");
-    utf8MethodGetProperty = getUTF8Chars(env, "getProperty");
-    utf8SigLjavaLangStringrLjavaLangString = getUTF8Chars(env, "(Ljava/lang/String;)Ljava/lang/String;");
+#endif	
 }
 
 /**
@@ -444,50 +496,49 @@ int getSystemProperty(JNIEnv *env, const TCHAR *propertyName, TCHAR **propertyVa
 
     if ((jClassSystem = (*env)->FindClass(env, utf8ClassJavaLangSystem)) != NULL) {
         if ((jMethodIdGetProperty = (*env)->GetStaticMethodID(env, jClassSystem, utf8MethodGetProperty, utf8SigLjavaLangStringrLjavaLangString)) != NULL) {
-            jStringKeyPropName = JNU_NewStringNative(env, propertyName);
-            if (jStringKeyPropName) {
+            if ((jStringKeyPropName = JNU_NewStringNative(env, propertyName)) != NULL) {
                 if ((jStringKeyValue = (jstring)(*env)->CallStaticObjectMethod(env, jClassSystem, jMethodIdGetProperty, jStringKeyPropName)) != NULL) {
                     /* Collect the value. */
                     if (!encodeNative) {
-                        keyChars = JNU_GetStringNativeChars(env, jStringKeyValue);
-                        if (keyChars) {
+                        if ((keyChars = JNU_GetStringNativeChars(env, jStringKeyValue)) != NULL) {
                             *propertyValue = malloc(sizeof(TCHAR) * (_tcslen(keyChars) + 1));
                             if (!*propertyValue) {
                                 throwOutOfMemoryError(env, TEXT("GSP1"));
                                 result = TRUE;
-                                } else {
-                                _tcscpy(*propertyValue, keyChars);
+                            } else {
+                                _tcsncpy(*propertyValue, keyChars, _tcslen(keyChars) + 1);
                                 result = FALSE;
                             }
+                            
                             free(keyChars);
                         } else {
                             /* Exception Thrown */
                             result = TRUE;
                         }
-                        (*env)->DeleteLocalRef(env, jStringKeyValue);
-                    } else { 
-                        keyChars = (TCHAR*)(*env)->GetStringUTFChars(env, jStringKeyValue, NULL);
-                        if (keyChars) {
+                    } else {
+                        if ((keyChars = (TCHAR*)(*env)->GetStringUTFChars(env, jStringKeyValue, NULL)) != NULL) {
                             *propertyValue = malloc(strlen((char*)keyChars) + 1);
                             if (!*propertyValue) {
                                 throwOutOfMemoryError(env, TEXT("GSP2"));
                                 result = TRUE;
-                                } else {
-                                strcpy((char*)*propertyValue, (char*)keyChars);
+                            } else {
+                                strncpy((char*)*propertyValue, (char*)keyChars, strlen((char*)keyChars) + 1);
                                 result = FALSE;
                             }
+                            
                             (*env)->ReleaseStringUTFChars(env, jStringKeyValue, (const char *)keyChars);
                         } else {
                             /* Exception Thrown */
                             result = TRUE;
                         }
-                        (*env)->DeleteLocalRef(env, jStringKeyValue);
-                    }                
+                    }
+                    
+                    (*env)->DeleteLocalRef(env, jStringKeyValue);
                 } else {
                     /* Property was not set. */
                     result = FALSE;
                 }
-    
+
                 (*env)->DeleteLocalRef(env, jStringKeyPropName);
             } else {
                 result = TRUE;
@@ -508,7 +559,44 @@ int getSystemProperty(JNIEnv *env, const TCHAR *propertyName, TCHAR **propertyVa
  * Do common initializaion.
  */
 void initCommon(JNIEnv *env, jclass jClassWrapperManager) {
+    TCHAR* outfile, *errfile;
+    int outfd, errfd, mode, options;
+
+#ifdef WIN32
+    mode = _S_IWRITE;
+    options = _O_WRONLY | _O_APPEND | _O_CREAT;
+#else
+    mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
+    options = O_WRONLY | O_APPEND | O_CREAT;
+#endif
     initUTF8Strings(env);
+
+    if (getSystemProperty(env, TEXT("wrapper.java.errfile"), &errfile, FALSE)) {
+        /* Failed */
+        return;
+    }
+    if (errfile) {
+        _ftprintf(stderr, TEXT("WrapperJNI: Redirecting %s to file %s...\n"), TEXT("StdErr"), errfile); fflush(NULL);
+        if (((errfd = _topen(errfile, options, mode)) == -1) || (dup2(errfd, STDERR_FILENO) == -1)) {
+            _ftprintf(stderr, TEXT("WrapperJNI: Failed to redirect %s to file %s  (Err: %s)\n"), TEXT("StdErr"), errfile, getLastErrorText()); fflush(NULL);
+            return;
+        } else {
+            redirectedStdErr = TRUE;
+        }
+    }
+    if (getSystemProperty(env, TEXT("wrapper.java.outfile"), &outfile, FALSE)) {
+        /* Failed */
+        return;
+    }
+    if (outfile) {
+        _tprintf(TEXT("WrapperJNI: Redirecting %s to file %s...\n"), TEXT("StdOut"), outfile); fflush(NULL);
+        if (((outfd = _topen(outfile, options, mode)) == -1) || (dup2(outfd, STDOUT_FILENO) == -1)) {
+            _tprintf(TEXT("WrapperJNI: Failed to redirect %s to file %s  (Err: %s)\n"), TEXT("StdOut"), errfile, getLastErrorText()); fflush(NULL);
+            return;
+        } else {
+            redirectedStdOut = TRUE;
+        }
+    }
 }
 
 void throwThrowable(JNIEnv *env, char *throwableClassName, const TCHAR *lpszFmt, ...) {
@@ -525,6 +613,10 @@ void throwThrowable(JNIEnv *env, char *throwableClassName, const TCHAR *lpszFmt,
         if (messageBufferSize == 0) {
             /* No buffer yet. Allocate one to get started. */
             messageBufferSize = 100;
+#if defined(HPUX)
+            /* Due to a bug in the HPUX libc (version < 1403), the length of the buffer passed to _vsntprintf must have a length of 1 + N, where N is a multiple of 8.  Adjust it as necessary. */
+            messageBufferSize = messageBufferSize + (((messageBufferSize - 1) % 8) == 0 ? 0 : 8 - ((messageBufferSize - 1) % 8)); 
+#endif
             messageBuffer = (TCHAR*)malloc( messageBufferSize * sizeof(TCHAR));
             if (!messageBuffer) {
                 throwOutOfMemoryError(env, TEXT("TT1"));
@@ -556,6 +648,10 @@ void throwThrowable(JNIEnv *env, char *throwableClassName, const TCHAR *lpszFmt,
             } else {
                 messageBufferSize = count + 1;
             }
+#if defined(HPUX)
+            /* Due to a bug in the HPUX libc (version < 1403), the length of the buffer passed to _vsntprintf must have a length of 1 + N, where N is a multiple of 8.  Adjust it as necessary. */
+            messageBufferSize = messageBufferSize + (((messageBufferSize - 1) % 8) == 0 ? 0 : 8 - ((messageBufferSize - 1) % 8)); 
+#endif
 
             messageBuffer = (TCHAR*)malloc(messageBufferSize * sizeof(TCHAR));
             if (!messageBuffer) {
@@ -578,23 +674,11 @@ void throwThrowable(JNIEnv *env, char *throwableClassName, const TCHAR *lpszFmt,
                         _tprintf(TEXT("WrapperJNI Error: Unable to throw %s with message: %s"), throwableClassName, messageBuffer); fflush(NULL);
                     }
                     (*env)->DeleteLocalRef(env, jThrowable);
-                } else {
-                    _tprintf(TEXT("WrapperJNI Error: Unable to create instance of class, '%s' to report exception: %s"),
-                        throwableClassName, messageBuffer); fflush(NULL);
                 }
                 (*env)->DeleteLocalRef(env, jMessageBuffer);
-            } else {
-                _tprintf(TEXT("WrapperJNI Error: Unable to create string to report '%s' exception: %s"),
-                    throwableClassName, messageBuffer); fflush(NULL);
             }
-        } else {
-            _tprintf(TEXT("WrapperJNI Error: Unable to find constructor for class, '%s' to report exception: %s"),
-                throwableClassName, messageBuffer); fflush(NULL);
         }
         (*env)->DeleteLocalRef(env, jThrowableClass);
-    } else {
-        _tprintf(TEXT("WrapperJNI Error: Unable to load class, '%s' to report exception: %s"),
-            throwableClassName, messageBuffer); fflush(NULL);
     }
     free(messageBuffer);
 }
@@ -617,32 +701,24 @@ void throwJNIError(JNIEnv *env, const TCHAR *message) {
     jmethodID constructor;
     jstring jMessage;
     jobject exception;
-    char *className = "org/tanukisoftware/wrapper/WrapperJNIError";
 
-    if ((exceptionClass = (*env)->FindClass(env, className)) != NULL) {
+    if ((exceptionClass = (*env)->FindClass(env, utf8ClassOrgTanukisoftwareWrapperWrapperJNIError)) != NULL) {
         /* Look for the constructor. Ignore failures. */
-        if ((constructor = (*env)->GetMethodID(env, exceptionClass, "<init>", "([B)V")) != NULL) {
-            jMessage = (*env)->NewByteArray(env, (jsize)_tcslen(message));
-            /* The 1.3.1 jni.h file does not specify the message as const.  The cast is to
-             *  avoid compiler warnings trying to pass a (const TCHAR *) as a (TCHAR *). */
-            jMessage = JNU_NewStringNative(env, message);
-
-            exception = (*env)->NewObject(env, exceptionClass, constructor, jMessage);
-
-            if ((*env)->Throw(env, exception)) {
-                _tprintf(TEXT("WrapperJNI Error: Unable to throw WrapperJNIError with message: %s"), message);
-                fflush(NULL);
+        if ((constructor = (*env)->GetMethodID(env, exceptionClass, utf8MethodInit, utf8Sig_BrV)) != NULL) {
+            if ((jMessage = JNU_NewStringNative(env, message)) != NULL) {
+                if ((exception = (*env)->NewObject(env, exceptionClass, constructor, jMessage)) != NULL) {
+                    if ((*env)->Throw(env, exception)) {
+                        _tprintf(TEXT("WrapperJNI Error: Unable to throw WrapperJNIError with message: %s"), message);
+                        fflush(NULL);
+                    }
+                    (*env)->DeleteLocalRef(env, exception);
+                }
+    
+                (*env)->DeleteLocalRef(env, jMessage);
             }
-
-            (*env)->DeleteLocalRef(env, jMessage);
-            (*env)->DeleteLocalRef(env, exception);
         }
 
         (*env)->DeleteLocalRef(env, exceptionClass);
-    } else {
-        _tprintf(TEXT("WrapperJNI Error: Unable to load class, '%s' to report exception: %s"),
-            className, message);
-        fflush(NULL);
     }
 }
 
@@ -735,6 +811,7 @@ Java_org_tanukisoftware_wrapper_WrapperManager_nativeGetControlEvent(JNIEnv *env
         fflush(NULL);
 #endif
     }
+
     if (wrapperReleaseControlEventQueue()) {
         /* Failed.  Should have been reported. */
         return event;

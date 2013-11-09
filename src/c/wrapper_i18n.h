@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999, 2010 Tanuki Software, Ltd.
+ * Copyright (c) 1999, 2013 Tanuki Software, Ltd.
  * http://www.tanukisoftware.com
  * All rights reserved.
  *
@@ -61,6 +61,7 @@ extern int multiByteToWideChar(const char *multiByteChars, const char *multiByte
 #define cgetts        _cgetws
 extern int _tchdir(const TCHAR *path);
 extern int _texecvp(TCHAR* arg, TCHAR **cmd);
+extern int _tmkfifo(TCHAR* arg, mode_t mode);
 #define _tchmod       _wchmod
 #define _tcprintf     _cwprintf
 #define _cputts       _cputws
@@ -91,7 +92,7 @@ extern TCHAR* _tgetcwd(TCHAR *buf, size_t size);
 #define _tmakepath    _wmakepath
 #define _tmkdir       _wmkdir
 #define _tmktemp      _wmktemp
-extern int _topen(const TCHAR *path, int oflag, ... );
+extern int _topen(const TCHAR *path, int oflag, mode_t mode);
 #define _tpopen       _wpopen
 #define _puttch       _putwch
 #if defined(WRAPPER_USE_PUTENV)
@@ -162,7 +163,7 @@ extern int _vsntprintf(wchar_t *ws, size_t n, const wchar_t *format, va_list arg
 #define _tasctime     _wasctime
 #define _tstof        _wtof
 #define _tstoi        _wtoi
-#define _ttoi(x)      wcstol(x, NULL, 0)
+#define _ttoi(x)      wcstol(x, NULL, 10)
 #define _tstol        _wtol
 #define _ttol         _wtol
 #define _tctime       _wctime
@@ -175,6 +176,13 @@ extern FILE * _tfopen(const wchar_t* file, const wchar_t* mode) ;
 #define _ftscanf      fwscanf
 #define _gettc        getwc
 #define _gettchar     getwchar
+/**
+ * This Wrapper function internally does a malloc to generate the
+ *  Wide-char version of the return string.  This must be freed by the caller.
+ *  Only needed inside the following:
+ *  #if !defined(WIN32) && defined(UNICODE)
+ *  #endif
+ */
 extern TCHAR * _tgetenv ( const TCHAR * name );
 #define _getts        getws
 #define _istalnum     iswalnum
@@ -261,6 +269,7 @@ typedef unsigned char _TUCHAR;
 #define _tcreat       _creat
 #define _tcscanf      _cscanf
 #define _tctime64     _ctime64
+#define _tmkfifo      mkfifo
 #define _texecl       execl
 #define _texecle      execle
 #define _texeclp      execlp

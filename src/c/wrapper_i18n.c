@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999, 2010 Tanuki Software, Ltd.
+ * Copyright (c) 1999, 2013 Tanuki Software, Ltd.
  * http://www.tanukisoftware.com
  * All rights reserved.
  *
@@ -143,7 +143,7 @@ int multiByteToWideChar(const char *multiByteChars, const char *multiByteEncodin
         if (conv_desc == (iconv_t)(-1)) {
             /* Initialization failure. */
             if (errno == EINVAL) {
-                errorTemplate = (localizeErrorMessage ? TEXT("Conversion from '%s' to '%s' is not supported.") : TEXT("Conversion from '%s' to '%s' is not supported."));
+                errorTemplate = (localizeErrorMessage ? TEXT("Conversion from '% s' to '% s' is not supported.") : TEXT("Conversion from '% s' to '% s' is not supported."));
                 errorTemplateLen = _tcslen(errorTemplate) + strlen(multiByteEncoding) + strlen(interumEncoding) + 1;
                 *outputBufferW = malloc(sizeof(TCHAR) * errorTemplateLen);
                 if (*outputBufferW) {
@@ -271,7 +271,7 @@ int multiByteToWideChar(const char *multiByteChars, const char *multiByteEncodin
 
     /* now store the result into a wchar_t */
     wideCharLen = mbstowcs(NULL, nativeCharStart, 0);
-    if (wideCharLen == -1) {
+    if (wideCharLen == (size_t)-1) {
         if (didIConv) {
             free(nativeCharStart);
         }
@@ -287,9 +287,6 @@ int multiByteToWideChar(const char *multiByteChars, const char *multiByteEncodin
             _sntprintf(*outputBufferW, errorTemplateLen, errorTemplate, errno);
         } else {
             /* Out of memory. *outputBufferW already NULL. */
-        }
-        if (didIConv) {
-            free(nativeCharStart);
         }
         return TRUE;
     }
@@ -319,8 +316,8 @@ size_t _treadlink(TCHAR* exe, TCHAR* fullPath, size_t size) {
     size_t req;
 
     req = wcstombs(NULL, exe, 0);
-    if (req < 0) {
-        return -1;
+    if (req == (size_t)-1) {
+        return (size_t)-1;
     }
     cExe = malloc(req + 1);
     if (cExe) {
@@ -330,11 +327,13 @@ size_t _treadlink(TCHAR* exe, TCHAR* fullPath, size_t size) {
             req = readlink(cExe, cFullPath, size);
             mbstowcs(fullPath, cFullPath, size);
             free(cFullPath);
+            free(cExe);
             return req * sizeof(TCHAR);
+        } else {
+            free(cExe);
         }
-        free(cExe);
     }
-    return -1;
+    return (size_t)-1;
 }
 
 /**
@@ -343,18 +342,18 @@ size_t _treadlink(TCHAR* exe, TCHAR* fullPath, size_t size) {
  */
 TCHAR* _tgetcwd(TCHAR *buf, size_t size) {
     char* cBuf;
-    char *ptr;
-
-    cBuf = malloc(size);
-    if (cBuf) {
-        wcstombs(cBuf, buf, size);
-        ptr = (char *)getcwd(cBuf, size);
-        if (ptr != NULL) {
-            mbstowcs(buf, cBuf, size * sizeof(TCHAR));
+    if (buf) {
+        cBuf = malloc(size);
+        if (cBuf) {
+            if (getcwd(cBuf, size) != NULL) {
+                mbstowcs(buf, cBuf, size * sizeof(TCHAR));
+                free(cBuf);
+                return buf;
+            }
+            free(cBuf);
         }
-        free(cBuf);
-    }
-    return buf;
+    } 
+    return NULL;
 }
 
 long _tpathconf(const TCHAR *path, int name) {
@@ -363,7 +362,7 @@ long _tpathconf(const TCHAR *path, int name) {
     long retVal;
 
     req = wcstombs(NULL, path, 0);
-    if (req < 0) {
+    if (req == (size_t)-1) {
         return -1;
     }
     cPath = malloc(req + 1);
@@ -394,7 +393,7 @@ TCHAR *_tsetlocale(int category, const TCHAR *locale) {
     size_t req;
 
     req = wcstombs(NULL, locale, 0);
-    if (req < 0) {
+    if (req == (size_t)-1) {
         return NULL;
     }
     cLocale = malloc(sizeof(char) * (req + 1));
@@ -405,7 +404,7 @@ TCHAR *_tsetlocale(int category, const TCHAR *locale) {
         
         if (cReturn) {
             req = mbstowcs(NULL, cReturn, 0);
-            if (req >= 0) {
+            if (req != (size_t)-1) {
                 tReturn = malloc(sizeof(TCHAR) * (req + 1));
                 if (tReturn) {
                     mbstowcs(tReturn, cReturn, req + 1);
@@ -425,7 +424,7 @@ int _tprintf(const wchar_t *fmt,...) {
     if (wcsstr(fmt, TEXT("%s")) != NULL) {
         msg = malloc(sizeof(wchar_t) * (wcslen(fmt) + 1));
         if (msg) {
-            wcscpy(msg, fmt);
+            wcsncpy(msg, fmt, wcslen(fmt) + 1);
             for (i = 0; i < wcslen(fmt); i++){
                 if (fmt[i] == TEXT('%') && i  < wcslen(fmt) && fmt[i + 1] == TEXT('s') && (i == 0 || fmt[i - 1] != TEXT('%'))) {
                     msg[i + 1] = TEXT('S');
@@ -458,7 +457,7 @@ int _ftprintf(FILE *stream, const wchar_t *fmt, ...) {
     if (wcsstr(fmt, TEXT("%s")) != NULL) {
         msg = malloc(sizeof(wchar_t) * (wcslen(fmt) + 1));
         if (msg) {
-            wcscpy(msg, fmt);
+            wcsncpy(msg, fmt, wcslen(fmt) + 1);
             for (i = 0; i < wcslen(fmt); i++){
                 if (fmt[i] == TEXT('%') && i  < wcslen(fmt) && fmt[i + 1] == TEXT('s') && (i == 0 || fmt[i - 1] != TEXT('%'))) {
                     msg[i + 1] = TEXT('S');
@@ -491,7 +490,7 @@ int _sntprintf(TCHAR *str, size_t size, const TCHAR *fmt, ...) {
     if (wcsstr(fmt, TEXT("%s")) != NULL) {
         msg = malloc(sizeof(wchar_t) * (wcslen(fmt) + 1));
         if (msg) {
-            wcscpy(msg, fmt);
+            wcsncpy(msg, fmt, wcslen(fmt) + 1);
             for (i = 0; i < wcslen(fmt); i++){
                 if (fmt[i] == TEXT('%') && i  < wcslen(fmt) && fmt[i + 1] == TEXT('s') && (i == 0 || fmt[i - 1] != TEXT('%'))) {
                     msg[i + 1] = TEXT('S');
@@ -556,19 +555,6 @@ int _trename(const TCHAR *path, const TCHAR *to) {
     return ret;
 }
 
-void _topenlog(const TCHAR *ident, int logopt, int facility) {
-    char* cIdent;
-    size_t req;
-
-    req = wcstombs(NULL, ident, 0) + 1;
-    cIdent = malloc(req);
-    if (cIdent) {
-        wcstombs(cIdent, ident, req);
-        openlog(cIdent, logopt, facility);
-        free(cIdent);
-    }
-}
-
 void _tsyslog(int priority, const TCHAR *message) {
     char* cMessage;
     size_t req;
@@ -585,6 +571,9 @@ void _tsyslog(int priority, const TCHAR *message) {
 /**
  * This Wrapper function internally does a malloc to generate the
  *  Wide-char version of the return string.  This must be freed by the caller.
+ *  Only needed inside the following:
+ *  #if !defined(WIN32) && defined(UNICODE)
+ *  #endif
  */
 TCHAR * _tgetenv( const TCHAR * name ) {
     char* cName;
@@ -647,6 +636,23 @@ int _tunlink(const wchar_t* address) {
         return size;
     }
     return -1;
+}
+
+
+int _tmkfifo(TCHAR* arg, mode_t mode) {
+    size_t size;
+    char *cStr;
+    int r; 
+
+    r = -1;
+    size = wcstombs(NULL, arg, 0) + 1;
+    cStr = malloc(size);
+    if (cStr) {
+        wcstombs(cStr, arg, size);
+        r = mkfifo(cStr, mode);
+        free(cStr);
+    }
+    return r;
 }
 
 int _tchdir(const TCHAR *path) {
@@ -822,7 +828,7 @@ int _texecve(TCHAR* arg, TCHAR **cmd, TCHAR** env) {
     return -1;
 }
 
-int _topen(const TCHAR *path, int oflag, ...) {
+int _topen(const TCHAR *path, int oflag, mode_t mode) {
     char* cPath;
     int r;
     size_t size;
@@ -831,7 +837,7 @@ int _topen(const TCHAR *path, int oflag, ...) {
     cPath = malloc(size);
     if (cPath) {
         wcstombs(cPath, path, size);
-        r = open(cPath, oflag, 0);
+        r = open(cPath, oflag, mode);
         free(cPath);
         return r;
     }

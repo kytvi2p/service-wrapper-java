@@ -1,4 +1,4 @@
-# Copyright (c) 1999, 2010 Tanuki Software, Ltd.
+# Copyright (c) 1999, 2013 Tanuki Software, Ltd.
 # http://www.tanukisoftware.com
 # All rights reserved.
 #
@@ -7,13 +7,13 @@
 # license agreement you entered into with Tanuki Software.
 # http://wrapper.tanukisoftware.com/doc/english/licenseOverview.html
 
-COMPILE = gcc -O3 -fPIC --pedantic -DAIX -DJSW64 -maix64 -D_FILE_OFFSET_BITS=64 -liconv -DUNICODE -D_UNICODE
+COMPILE = gcc -O3 -fPIC --pedantic -DAIX -DJSW64 -maix64 -D_FILE_OFFSET_BITS=64 -liconv -DUNICODE -D_UNICODE -D_THREAD_SAFE
 
 INCLUDE=$(JAVA_HOME)/include
 
 DEFS = -I$(INCLUDE) -I$(INCLUDE)/aix
 
-wrapper_SOURCE = wrapper.c wrapperinfo.c wrappereventloop.c wrapper_unix.c property.c logger.c wrapper_file.c wrapper_i18n.c
+wrapper_SOURCE = wrapper.c wrapperinfo.c wrappereventloop.c wrapper_unix.c property.c logger.c wrapper_file.c wrapper_i18n.c wrapper_hashmap.c
 
 libwrapper_a_SOURCE = wrapper_i18n.c wrapperjni_unix.c wrapperinfo.c wrapperjni.c
 

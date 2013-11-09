@@ -66,7 +66,7 @@ wrapper.java.library.path.1=../lib
 wrapper.java.additional.auto_bits=TRUE
 
 # Java Additional Parameters
-#wrapper.java.additional.1=
+wrapper.java.additional.1=
 
 # Initial Java Heap Size (in MB)
 #wrapper.java.initmemory=3
@@ -117,6 +117,9 @@ wrapper.syslog.loglevel=NONE
 # Allow for the use of non-contiguous numbered properties
 wrapper.ignore_sequence_gaps=TRUE
 
+# Do not start if the pid file already exists.
+wrapper.pidfile.strict=TRUE
+
 # Title to use when running as a console
 wrapper.console.title=@app.long.name@
 
@@ -130,9 +133,16 @@ wrapper.check.deadlock.action=RESTART
 wrapper.check.deadlock.output=FULL
 
 # Out Of Memory detection.
-wrapper.filter.trigger.1000=java.lang.OutOfMemoryError
-wrapper.filter.action.1000=RESTART
-wrapper.filter.message.1000=The JVM has run out of memory.
+#  Ignore -verbose:class output to avoid false positives.
+wrapper.filter.trigger.1000=[Loaded java.lang.OutOfMemoryError
+wrapper.filter.action.1000=NONE
+# (Simple match)
+wrapper.filter.trigger.1001=java.lang.OutOfMemoryError
+# (Only match text in stack traces if -XX:+PrintClassHistogram is being used.)
+#wrapper.filter.trigger.1001=Exception in thread "*" java.lang.OutOfMemoryError
+#wrapper.filter.allow_wildcards.1001=TRUE
+wrapper.filter.action.1001=RESTART
+wrapper.filter.message.1001=The JVM has run out of memory.
 
 #********************************************************************
 # Wrapper Email Notifications. (Requires Professional Edition)
