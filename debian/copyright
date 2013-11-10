@@ -109,7 +109,11 @@ License: wrapper-community-license-1.1
  
 Files: debian/*
 Copyright: 2010-2011 Rémi Debay <debay.remi@gmail.com>
-           2011-2012 tony mancill <tmancill@debian.org>
+           2011-2013 tony mancill <tmancill@debian.org>
+           2011-2013 Kill Your TV <killyourtv@i2pmail.org>
+Comment: Kill Your TV's packaging is released under the WTFPL.
+ Since this license is so permissive, those contributions to Debian
+ packaging are relicensed as GPL-2+.
 License: GPL-2+
  This package is free software; you can redistribute it and/or modify
  it under the terms of the GNU General Public License as published by
@@ -126,4 +130,3 @@ License: GPL-2+
  .
  On Debian systems, the complete text of the GNU General
  Public License can be found in "/usr/share/common-licenses/GPL-2".
-
