@@ -2,9 +2,15 @@ Source: service-wrapper-java
 Section: java
 Priority: optional
 Maintainer: Kill Your TV <killyourtv@i2pmail.org>
-Build-Depends: debhelper (>= 9), javahelper, default-jdk,
- ant, ant-optional, junit, junit4, hardening-wrapper
-Standards-Version: 3.9.4
+Build-Depends: debhelper (>= 9),
+ javahelper,
+ default-jdk,
+ ant,
+ ant-optional,
+ junit,
+ junit4,
+ hardening-wrapper
+Standards-Version: 3.9.5
 Homepage: http://wrapper.tanukisoftware.com
 
 Package: service-wrapper
