@@ -1,6 +1,6 @@
 service-wrapper-java (3.5.22-1) unstable; urgency=low
 
-  * New upstream release.
+  * New upstream release.  (Closes: #610374)
     - Thanks to Kill Your TV <killyourtv@i2pmail.org> for updated packaging.
   * debian/control
     - Build-depend on debhelper >=9, default-jdk.
@@ -8,8 +8,9 @@ service-wrapper-java (3.5.22-1) unstable; urgency=low
     - Bump Standards-Version to 3.9.5 (no changes).
   * debian/rules
     - Enable build hardening.
+    - Tweak for new upstream release.
   * Add javadocs in -doc package.
-  * Allow any arch to be built.
+  * Now allow any arch to be built.
   * Separate preinst scripts for -jni and -java packages.
 
  -- tony mancill <tmancill@debian.org>  Sat, 09 Nov 2013 21:49:53 -0800
