@@ -9,54 +9,31 @@
 # Uncomment this to turn on verbose mode.
 #export DH_VERBOSE=1
 
-export CLASSPATH="/usr/share/java/junit4.jar:/usr/share/java/junit.jar:/usr/share/java/commons-collections.jar"
+export CLASSPATH=/usr/share/java/junit4.jar:/usr/share/java/junit.jar:/usr/share/java/commons-collections.jar
 export DEB_HOST_ARCH := $(shell dpkg-architecture -qDEB_HOST_ARCH)
 export DEB_HOST_ARCH_CPU := $(shell dpkg-architecture -qDEB_HOST_ARCH_CPU)
 
 export JAVA_HOME=/usr/lib/jvm/default-java
 export DEB_BUILD_HARDENING=1
-#build:
-#	@echo 'The build target is disabled. Use the appropriate binary target.'
 
 %:
 	dh $@  --with javahelper
 
-# Quoting Policy version 3.9.2.0, 2011-04-07 section 4.9:
-
-# /start quote
-# For some packages, notably ones where the same source tree is compiled in
-# different ways to produce two binary packages, the build target does not make
-# much sense. For these packages it is good enough to provide two (or more)
-# targets (build-a and build-b or whatever) for each of the ways of building the
-# package, and a build target that does nothing. The binary target will have to
-# build the package in each of the possible ways and make the binary package out
-# of each.
-# ...
-# When a package has a configuration and build routine which takes a long time,
-# or when the makefiles are poorly designed, or when build needs to run clean
-# first, it is a good idea to touch build when the build process is complete.
-# This will ensure that if debian/rules build is run again it will not rebuild
-# the whole program.
-# /end quote
-
-# Since that fits building the service-wrapper, we override the build target.
-#
-
-
 override_dh_auto_clean:
-	-ant -f build.xml -Dbits=$$(dpkg-architecture -qDEB_HOST_ARCH_BITS) total-clean
+	-ant -f build.xml \
+          -Dbits=$$(dpkg-architecture -qDEB_HOST_ARCH_BITS) total-clean
 	jh_build --clean
 	rm -f bin/* build/* conf/* lib/* logs/* test/* src/c/*.o src/c/wrapperinfo.c
 
 override_dh_auto_build:
 	dh_testdir
 	jh_build
-	ant -f build.xml -Dbits=$$(dpkg-architecture -qDEB_HOST_ARCH_BITS) compile-c-unix
+	ant -f build.xml \
+	  -Dbits=$$(dpkg-architecture -qDEB_HOST_ARCH_BITS) compile-c-unix
+	ant -f build.xml \
+	  -Dbits=$$(dpkg-architecture -qDEB_HOST_ARCH_BITS) conf
+	BUILD_DIR=lib /bin/sh $(CURDIR)/debian/build-wrapper-scripts \
+	  /usr/share/wrapper/daemon.sh /usr/sbin/wrapper
 
 override_dh_installchangelogs:
 	dh_installchangelogs doc/revisions.txt
-
-override_dh_installdocs:
-	dh_installdocs -p libservice-wrapper-java -p libservice-wrapper-jni --link-doc=service-wrapper
-	dh_installdocs --remaining-packages
-

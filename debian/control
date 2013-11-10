@@ -1,7 +1,8 @@
 Source: service-wrapper-java
 Section: java
 Priority: optional
-Maintainer: Kill Your TV <killyourtv@i2pmail.org>
+Maintainer: Rémi Debay <debay.remi@gmail.com>
+Uploaders: tony mancill <tmancill@debian.org>
 Build-Depends: debhelper (>= 9),
  javahelper,
  default-jdk,
@@ -16,8 +17,10 @@ Vcs-Browser: http://git.debian.org/?p=collab-maint/service-wrapper-java.git
 Homepage: http://wrapper.tanukisoftware.com
 
 Package: service-wrapper
-Architecture:  any
-Depends:  ${shlibs:Depends}, ${misc:Depends}, libservice-wrapper-java (>= ${source:Version}), libservice-wrapper-jni (>= ${source:Version})
+Architecture: any
+Depends:  ${shlibs:Depends}, ${misc:Depends},
+ libservice-wrapper-java (>= ${source:Version}),
+ libservice-wrapper-jni (>= ${source:Version})
 Description:Jar daemon wrapper
  The Java Service Wrapper makes very easy to install a Java Application as a
  daemon process on Unix systems. The Wrapper monitors a JVM (Java Virtual
@@ -28,7 +31,7 @@ Description:Jar daemon wrapper
 
 Package: libservice-wrapper-java
 Architecture: all
-Depends: ${java:Depends}, ${shlibs:Depends}, ${misc:Depends}
+Depends: ${shlibs:Depends}, ${misc:Depends},
 Suggests: libservice-wrapper-doc
 Description:Jar daemon wrapper java libraries
  This Package contains the Java jar libraries used by the Java Service Wrapper.
