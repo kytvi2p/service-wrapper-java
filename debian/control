@@ -11,6 +11,8 @@ Build-Depends: debhelper (>= 9),
  junit4,
  hardening-wrapper
 Standards-Version: 3.9.5
+Vcs-Git: git://git.debian.org/git/collab-maint/service-wrapper-java.git
+Vcs-Browser: http://git.debian.org/?p=collab-maint/service-wrapper-java.git
 Homepage: http://wrapper.tanukisoftware.com
 
 Package: service-wrapper
@@ -26,7 +28,8 @@ Description:Jar daemon wrapper
 
 Package: libservice-wrapper-java
 Architecture: all
-Depends: ${shlibs:Depends}, ${misc:Depends}
+Depends: ${java:Depends}, ${shlibs:Depends}, ${misc:Depends}
+Suggests: libservice-wrapper-doc
 Description:Jar daemon wrapper java libraries
  This Package contains the Java jar libraries used by the Java Service Wrapper.
  It can be used to handle wrapper specific attributes.
