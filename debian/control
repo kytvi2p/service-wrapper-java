@@ -17,7 +17,7 @@ Vcs-Browser: http://git.debian.org/?p=collab-maint/service-wrapper-java.git
 Homepage: http://wrapper.tanukisoftware.com
 
 Package: service-wrapper
-Architecture: any
+Architecture: amd64 armel armhf i386 ia64 kfreebsd-amd64 kfreebsd-i386 powerpc
 Depends:  ${shlibs:Depends}, ${misc:Depends},
  libservice-wrapper-java (>= ${source:Version}),
  libservice-wrapper-jni (>= ${source:Version})
@@ -45,7 +45,7 @@ Description:Jar daemon wrapper java libraries
 
 
 Package: libservice-wrapper-jni
-Architecture: any
+Architecture: amd64 armel armhf i386 ia64 kfreebsd-amd64 kfreebsd-i386 powerpc
 Depends: ${shlibs:Depends}, ${misc:Depends},
  default-jre-headless | java5-runtime-headless | java6-runtime-headless
 Suggests: libservice-wrapper-doc
