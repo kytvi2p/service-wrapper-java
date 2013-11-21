@@ -1,3 +1,10 @@
+service-wrapper-java (3.5.22-2) unstable; urgency=low
+
+  * Only build for upstram supported architectures. See: #730010
+    - amd64 armel armhf i386 ia64 kfreebsd-amd64 kfreebsd-i386 powerpc
+
+ -- tony mancill <tmancill@debian.org>  Thu, 21 Nov 2013 07:14:28 -0800
+
 service-wrapper-java (3.5.22-1) unstable; urgency=low
 
   * New upstream release.  (Closes: #610374)
