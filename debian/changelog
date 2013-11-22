@@ -1,8 +1,14 @@
+service-wrapper-java (3.5.22-3) UNRELEASED; urgency=low
+
+  * Correct bug number typo in previous upload.
+
+ -- tony mancill <tmancill@debian.org>  Thu, 21 Nov 2013 21:53:02 -0800
+
 service-wrapper-java (3.5.22-2) unstable; urgency=low
 
   * Only build for upstram supported architectures. See: #730010
     - amd64 armel armhf i386 ia64 kfreebsd-amd64 kfreebsd-i386 powerpc
-  * Add patch for bashisms in daemon.sh script.  (Closes: #670722)
+  * Add patch for bashisms in daemon.sh script.  (Closes: #690722)
 
  -- tony mancill <tmancill@debian.org>  Thu, 21 Nov 2013 21:23:42 -0800
 
