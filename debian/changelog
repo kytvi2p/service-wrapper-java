@@ -1,8 +1,9 @@
 service-wrapper-java (3.5.22-3) UNRELEASED; urgency=low
 
   * Correct bug number typo in previous upload.
+  * Add mips-makefile patch - see #730010
 
- -- tony mancill <tmancill@debian.org>  Thu, 21 Nov 2013 21:53:02 -0800
+ -- tony mancill <tmancill@debian.org>  Sat, 23 Nov 2013 20:00:20 -0800
 
 service-wrapper-java (3.5.22-2) unstable; urgency=low
 
