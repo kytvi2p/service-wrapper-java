@@ -5,8 +5,9 @@ service-wrapper-java (3.5.22-3) UNRELEASED; urgency=low
     - s390x
     - mips
     - mipsel
+    - sparc
 
- -- tony mancill <tmancill@debian.org>  Sat, 23 Nov 2013 20:00:20 -0800
+ -- tony mancill <tmancill@debian.org>  Mon, 25 Nov 2013 17:48:46 -0800
 
 service-wrapper-java (3.5.22-2) unstable; urgency=low
 
