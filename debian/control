@@ -17,7 +17,7 @@ Vcs-Browser: http://git.debian.org/?p=collab-maint/service-wrapper-java.git
 Homepage: http://wrapper.tanukisoftware.com
 
 Package: service-wrapper
-Architecture: amd64 armel armhf i386 ia64 kfreebsd-amd64 kfreebsd-i386 powerpc mips mipsel s390x
+Architecture: amd64 armel armhf i386 ia64 kfreebsd-amd64 kfreebsd-i386 powerpc mips mipsel s390x sparc
 Depends:  ${shlibs:Depends}, ${misc:Depends},
  libservice-wrapper-java (>= ${source:Version}),
  libservice-wrapper-jni (>= ${source:Version})
