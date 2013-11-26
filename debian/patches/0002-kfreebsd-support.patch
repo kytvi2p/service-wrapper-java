@@ -12,8 +12,6 @@ Subject: kfreebsd support
  create mode 100644 src/c/Makefile-kfreebsd-x86-32.make
  create mode 100644 src/c/Makefile-kfreebsd-x86-64.make
 
-diff --git a/build.xml b/build.xml
-index fa2c6d5..5206ccf 100644
 --- a/build.xml
 +++ b/build.xml
 @@ -87,6 +87,9 @@
@@ -35,9 +33,6 @@ index fa2c6d5..5206ccf 100644
              <not>
                  <equals arg1="${sun.arch.data.model}" arg2="${bits}"/>
              </not>
-diff --git a/src/c/Makefile-kfreebsd-x86-32.make b/src/c/Makefile-kfreebsd-x86-32.make
-new file mode 100644
-index 0000000..462314a
 --- /dev/null
 +++ b/src/c/Makefile-kfreebsd-x86-32.make
 @@ -0,0 +1,42 @@
@@ -83,9 +78,6 @@ index 0000000..462314a
 +
 +#%.o: %.c
 +#	$(COMPILE) -c $(DEFS) $<
-diff --git a/src/c/Makefile-kfreebsd-x86-64.make b/src/c/Makefile-kfreebsd-x86-64.make
-new file mode 100644
-index 0000000..907978a
 --- /dev/null
 +++ b/src/c/Makefile-kfreebsd-x86-64.make
 @@ -0,0 +1,42 @@
@@ -131,11 +123,9 @@ index 0000000..907978a
 +
 +#%.o: %.c
 +#	$(COMPILE) -c $(DEFS) $<
-diff --git a/src/c/logger.c b/src/c/logger.c
-index 363d42f..fbc9fbd 100644
 --- a/src/c/logger.c
 +++ b/src/c/logger.c
-@@ -76,7 +76,7 @@ typedef long intptr_t;
+@@ -76,7 +76,7 @@
   #elif defined(AIX) || defined(HPUX) || defined(MACOSX) || defined(OSF1)
   #elif defined(IRIX)
    #define PATH_MAX FILENAME_MAX
@@ -144,8 +134,6 @@ index 363d42f..fbc9fbd 100644
    #include <sys/param.h>
    #include <errno.h>
   #else /* LINUX */
-diff --git a/src/c/wrapper.c b/src/c/wrapper.c
-index 13312b5..1f4a064 100644
 --- a/src/c/wrapper.c
 +++ b/src/c/wrapper.c
 @@ -98,7 +98,7 @@
@@ -157,7 +145,7 @@ index 13312b5..1f4a064 100644
    #include <sys/param.h>
    #include <errno.h>
   #else /* LINUX */
-@@ -4619,7 +4619,7 @@ int checkIfBinary(const TCHAR *filename) {
+@@ -4619,7 +4619,7 @@
              log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_DEBUG, TEXT("Magic number for file %s: 0x%02x%02x%02x%02x"), filename, head[0], head[1], head[2], head[3]);
          }
  
@@ -166,7 +154,7 @@ index 13312b5..1f4a064 100644
          if (head[1] == 'E' && head[2] == 'L' && head[3] == 'F') {
              return 1; /*ELF */
  #elif defined(AIX)
-@@ -5912,6 +5912,8 @@ int wrapperBuildJavaCommandArrayInner(TCHAR **strings, int addQuotes, const TCHA
+@@ -5913,6 +5913,8 @@
                                TEXT("wrapper.java.additional.auto_bits.solaris"),
  #elif defined(FREEBSD)
                                TEXT("wrapper.java.additional.auto_bits.freebsd"),
