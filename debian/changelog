@@ -1,7 +1,10 @@
 service-wrapper-java (3.5.22-3) UNRELEASED; urgency=low
 
   * Correct bug number typo in previous upload.
-  * Add mips-makefile patch - see #730010
+  * Add additional-makefiles.patch - see #730010
+    - s390x
+    - mips
+    - mipsel
 
  -- tony mancill <tmancill@debian.org>  Sat, 23 Nov 2013 20:00:20 -0800
 
