@@ -1,8 +1,9 @@
 Source: service-wrapper-java
 Section: java
 Priority: optional
-Maintainer: Rémi Debay <debay.remi@gmail.com>
-Uploaders: tony mancill <tmancill@debian.org>
+Maintainer: Debian Java Maintainers <pkg-java-maintainers@lists.alioth.debian.org>
+Uploaders: tony mancill <tmancill@debian.org>,
+ Rémi Debay <debay.remi@gmail.com>
 Build-Depends: debhelper (>= 9),
  javahelper,
  default-jdk,
@@ -12,8 +13,8 @@ Build-Depends: debhelper (>= 9),
  junit4,
  hardening-wrapper
 Standards-Version: 3.9.5
-Vcs-Git: git://git.debian.org/git/collab-maint/service-wrapper-java.git
-Vcs-Browser: http://git.debian.org/?p=collab-maint/service-wrapper-java.git
+Vcs-Git: git://git.debian.org/git/pkg-java/service-wrapper-java.git
+Vcs-Browser: http://git.debian.org/?p=pkg-java/service-wrapper-java.git
 Homepage: http://wrapper.tanukisoftware.com
 
 Package: service-wrapper
