@@ -1,4 +1,4 @@
-service-wrapper-java (3.5.22-3) UNRELEASED; urgency=low
+service-wrapper-java (3.5.22-3) unstable; urgency=low
 
   * Correct bug number typo in previous upload.
   * Add additional-makefiles.patch - see #730010
@@ -6,8 +6,10 @@ service-wrapper-java (3.5.22-3) UNRELEASED; urgency=low
     - mips
     - mipsel
     - sparc
+  * Maintainer is now the Java Team.
+  * Change Vcs URLs from collab-maint to pkg-java.
 
- -- tony mancill <tmancill@debian.org>  Mon, 25 Nov 2013 17:48:46 -0800
+ -- tony mancill <tmancill@debian.org>  Wed, 16 Apr 2014 20:54:50 -0700
 
 service-wrapper-java (3.5.22-2) unstable; urgency=low
 
