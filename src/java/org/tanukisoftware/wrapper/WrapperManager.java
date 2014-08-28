@@ -315,6 +315,9 @@ public final class WrapperManager
     /** Tracks the total number of outstanding shutdown locks. */
     private static int m_shutdownLocks = 0;
     
+    /** Tracks the number of threads which are attempting to launch child processes. */
+    private static int m_runningExecs = 0;
+    
     private static String[] m_args;
     private static int m_backendType = BACKEND_TYPE_UNKNOWN;
     private static boolean m_backendConnected = false;
@@ -599,14 +602,16 @@ public final class WrapperManager
         
         if ( m_debug )
         {
-            m_outDebug.println( getRes().getString( "WrapperManager class initialized by thread: {0}   Using classloader: {1}", Thread.currentThread().getName(), WrapperManager.class.getClassLoader().toString() ) );
+            // This message is logged when localization is not yet initialized.
+            m_outDebug.println( "WrapperManager class initialized by thread: " + Thread.currentThread().getName() + "   Using classloader: " + WrapperManager.class.getClassLoader().toString() );
         }
         
         // The copyright banner was moved into the wrapper binary.  In order to
         //  aid in the debugging of user integrations, some kind of a known message
         //  needs to be displayed on startup so it is obvious whether or not the
         //  WrapperManager class is being initialized.
-        m_outInfo.println( getRes().getString( "Initializing..." ) );
+        // This message is logged when localization is not yet initialized.
+        m_outInfo.println( "Initializing..." );
         
         // We need to get the key before the version can be verified.
         m_key = System.getProperty( "wrapper.key" );
@@ -621,6 +626,7 @@ public final class WrapperManager
         m_jvmId = WrapperSystemPropertyUtil.getIntProperty( "wrapper.jvmid", 1 );
         if ( m_debug )
         {
+            // This message is logged when localization is not yet initialized.
             m_outDebug.println( "JVM #" + m_jvmId );
         }
         
@@ -634,11 +640,13 @@ public final class WrapperManager
         {
             if ( m_jvmBits > 0 )
             {
-                m_outDebug.println( getRes().getString( "Running a {0}-bit JVM.", new Integer( m_jvmBits ) ) );
+                // This message is logged when localization is not yet initialized.
+                m_outDebug.println( "Running a " + m_jvmBits + "-bit JVM." );
             }
             else
             {
-                m_outDebug.println( getRes().getString( "The bit depth of this JVM could not be determined." ) );
+                // This message is logged when localization is not yet initialized.
+                m_outDebug.println( "The bit depth of this JVM could not be determined." );
             }
         }
         
@@ -681,7 +689,8 @@ public final class WrapperManager
         {
             if ( m_debug )
             {
-                m_outDebug.println( getRes().getString( "Registering shutdown hook" ) );
+                // This message is logged when localization is not yet initialized.
+                m_outDebug.println( "Registering shutdown hook" );
             }
             m_hook = new Thread( "Wrapper-Shutdown-Hook" )
             {
@@ -736,7 +745,8 @@ public final class WrapperManager
         {
             if ( m_debug )
             {
-                m_outDebug.println( getRes().getString( "Not using wrapper.  (key not specified)" ) );
+                // This message is logged when localization is not yet initialized.
+                m_outDebug.println( "Not using wrapper.  (key not specified)" );
             }
             
             // The wrapper will not be used, so other values will not be used.
@@ -776,7 +786,8 @@ public final class WrapperManager
                 String sPort;
                 if ( ( sPort = System.getProperty( "wrapper.port" ) ) == null )
                 {
-                    String msg = getRes().getString( "The 'wrapper.port' system property was not set." );
+                    // This message is logged when localization is not yet initialized.
+                    String msg = "The 'wrapper.port' system property was not set.";
                     m_outError.println( msg );
                     throw new ExceptionInInitializerError( msg );
                 }
@@ -786,7 +797,8 @@ public final class WrapperManager
                 }
                 catch ( NumberFormatException e )
                 {
-                    String msg = getRes().getString( "''{0}'' is not a valid value for ''wrapper.port''.", sPort );
+                    // This message is logged when localization is not yet initialized.
+                    String msg = "'" + sPort + "' is not a valid value for 'wrapper.port'.";
                     m_outError.println( msg );
                     throw new ExceptionInInitializerError( msg );
                 }
@@ -820,7 +832,8 @@ public final class WrapperManager
                 }
                 catch ( NumberFormatException e )
                 {
-                    String msg = getRes().getString( "''{0}'' is not a valid value for ''wrapper.cpu.timeout''.", sCPUTimeout );
+                    // This message is logged when localization is not yet initialized.
+                    String msg = "'" + sCPUTimeout + "' is not a valid value for 'wrapper.cpu.timeout'.";
                     m_outError.println( msg );
                     throw new ExceptionInInitializerError( msg );
                 }
@@ -862,35 +875,6 @@ public final class WrapperManager
                     m_outDebug.println( getRes().getString( "Call to nativeGetJavaPID() failed: {0}", e ) );
                 }
             }
-            
-            // Cache the values of the professional and standard edition flags.
-            try
-            {
-                m_professionalEdition = nativeIsProfessionalEdition();
-            }
-            catch ( Throwable e )
-            {
-                if ( m_debug )
-                {
-                    m_outDebug.println( getRes().getString( 
-                            "Call to nativeIsProfessionalEdition() failed: {0}" , e  ) );
-                }
-                m_professionalEdition = false;
-            }
-            try
-            {
-                m_standardEdition = nativeIsStandardEdition();
-            }
-            catch ( Throwable e )
-            {
-                if ( m_debug )
-                {
-                    m_outDebug.println( getRes().getString( 
-                            "Call to nativeIsStandardEdition() failed: {0}" , e  ) );
-                }
-                m_standardEdition = false;
-            }
-            
         }
         
         // Start a thread which looks for control events sent to the
@@ -1456,8 +1440,9 @@ public final class WrapperManager
         if ( baseName == null )
         {
             // This should only happen if an old version of the Wrapper binary is being used.
-            m_outInfo.println( getRes().getString( "WARNING - The wrapper.native_library system property was not" ) );
-            m_outInfo.println( getRes().getString( "          set. Using the default value, 'wrapper'." ) );
+            // This message is logged when localization is not yet initialized.
+            m_outInfo.println( "WARNING - The wrapper.native_library system property was not" );
+            m_outInfo.println( "          set. Using the default value, 'wrapper'." );
             baseName = "wrapper";
         }
         String[] detailedNames = new String[4];
@@ -1488,8 +1473,8 @@ public final class WrapperManager
         //  the brief name.
         if ( m_debug )
         {
-            m_outDebug.println( getRes().getString(
-                "Load native library.  There are multiple possible file names and the first to be found will be used.  Errors loading non-existing files is normal and is only a problem if they all fail." ) ); 
+            // This message is logged when localization is not yet initialized.
+            m_outDebug.println( "Load native library.  There are multiple possible file names and the first to be found will be used.  Errors loading non-existing files is normal and is only a problem if they all fail." ); 
         }
         m_libraryOK = false;
         for ( int i = 0; i < detailedNames.length; i++ )
@@ -1512,7 +1497,36 @@ public final class WrapperManager
         {
             if ( m_debug )
             {
-                m_outDebug.println( getRes().getString( "  Successfully loaded native library." ) );
+                // This message is logged when localization is not yet initialized.
+                m_outDebug.println( "  Successfully loaded native library." );
+            }
+            
+            // Cache the values of the professional and standard edition flags.
+            try
+            {
+                m_professionalEdition = nativeIsProfessionalEdition();
+            }
+            catch ( Throwable e )
+            {
+                if ( m_debug )
+                {
+                    // This message is logged when localization is not yet initialized.
+                    m_outDebug.println( "Call to nativeIsProfessionalEdition() failed: " + e );
+                }
+                m_professionalEdition = false;
+            }
+            try
+            {
+                m_standardEdition = nativeIsStandardEdition();
+            }
+            catch ( Throwable e )
+            {
+                if ( m_debug )
+                {
+                    // This message is logged when localization is not yet initialized.
+                    m_outDebug.println( "Call to nativeIsStandardEdition() failed: " + e );
+                }
+                m_standardEdition = false;
             }
             
             // Try reloading the resources once the library is initialized so we get actual localized content.
@@ -1549,14 +1563,11 @@ public final class WrapperManager
             if ( libPath.equals( "" ) )
             {
                 // No library path
-                m_outInfo.println( getRes().getString( 
-                    "WARNING - Unable to load the Wrapper's native library because the\n" ) );
-                m_outInfo.println( getRes().getString( 
-                    "          java.library.path was set to ''.  Please see the" ) );
-                m_outInfo.println( getRes().getString( 
-                    "          documentation for the wrapper.java.library.path " ) );
-                m_outInfo.println( getRes().getString( 
-                    "          configuration property." ) );
+                // This message is logged when localization is unavailable.
+                m_outInfo.println( "WARNING - Unable to load the Wrapper's native library because the" );
+                m_outInfo.println( "          java.library.path was set to ''.  Please see the" );
+                m_outInfo.println( "          documentation for the wrapper.java.library.path" );
+                m_outInfo.println( "          configuration property." );
             }
             else
             {
@@ -1586,22 +1597,18 @@ public final class WrapperManager
                 if ( libFile == null )
                 {
                     // The library could not be located on the library path.
-                    m_outInfo.println( getRes().getString( 
-                        "WARNING - Unable to load the Wrapper's native library because none of the" ) );
-                    m_outInfo.println( getRes().getString( 
-                        "          following files:" ) );
+                    // This message is logged when localization is unavailable.
+                    m_outInfo.println( "WARNING - Unable to load the Wrapper's native library because none of the" );
+                    m_outInfo.println( "          following files:" );
                     for ( int i = 0; i < detailedNames.length; i++ )
                     {
                         if ( detailedFiles[i] != null )
                         {
-                            m_outInfo.println(
-                                "            " + detailedFiles[i] );
+                            m_outInfo.println( "            " + detailedFiles[i] );
                         }
                     }
-                    m_outInfo.println(
-                        "            " + file );
-                    m_outInfo.println( getRes().getString( 
-                        "          could be located on the following java.library.path:" ) );
+                    m_outInfo.println( "            " + file );
+                    m_outInfo.println( "          could be located on the following java.library.path:" );
                     
                     String pathSep = System.getProperty( "path.separator" );
                     StringTokenizer st = new StringTokenizer( libPath, pathSep );
@@ -1610,48 +1617,35 @@ public final class WrapperManager
                         File pathElement = new File( st.nextToken() );
                         m_outInfo.println( "            " + pathElement.getAbsolutePath() );
                     }
-                    m_outInfo.println( getRes().getString( 
-                        "          Please see the documentation for the wrapper.java.library.path" ) );
-                    m_outInfo.println(getRes().getString( 
-                        "          configuration property." ) );
+                    m_outInfo.println( "          Please see the documentation for the wrapper.java.library.path" );
+                    m_outInfo.println( "          configuration property." );
                 }
                 else
                 {
                     // The library file was found but could not be loaded for some reason.
-                    m_outInfo.println( getRes().getString( 
-                        "WARNING - Unable to load the Wrapper''s native library ''{0}''.", libFile.getName() ) );
-                    m_outInfo.println( getRes().getString( 
-                        "          The file is located on the path at the following location but" ) );
-                    m_outInfo.println( getRes().getString( 
-                        "          could not be loaded:" ) );
-                    m_outInfo.println(
-                        "            " + libFile.getAbsolutePath() );
-                    m_outInfo.println(getRes().getString(
-                        "          Please verify that the file is both readable and executable by the" ) );
-                    m_outInfo.println(getRes().getString(
-                        "          current user and that the file has not been corrupted in any way." ) );
-                    m_outInfo.println(getRes().getString(
-                        "          One common cause of this problem is running a 32-bit version" ) );
-                    m_outInfo.println(getRes().getString(
-                        "          of the Wrapper with a 64-bit version of Java, or vica versa." ) );
+                    // This message is logged when localization is unavailable.
+                    m_outInfo.println( "WARNING - Unable to load the Wrapper''s native library '" + libFile.getName() + "'." );
+                    m_outInfo.println( "          The file is located on the path at the following location but" );
+                    m_outInfo.println( "          could not be loaded:" );
+                    m_outInfo.println( "            " + libFile.getAbsolutePath() );
+                    m_outInfo.println( "          Please verify that the file is both readable and executable by the" );
+                    m_outInfo.println( "          current user and that the file has not been corrupted in any way." );
+                    m_outInfo.println( "          One common cause of this problem is running a 32-bit version" );
+                    m_outInfo.println( "          of the Wrapper with a 64-bit version of Java, or vica versa." );
                     if ( m_jvmBits > 0 )
                     {
-                        m_outInfo.println( getRes().getString( 
-                            "          This is a {0}-bit JVM.",  new Integer( m_jvmBits ) ) );
+                        m_outInfo.println( "          This is a " + m_jvmBits + "-bit JVM." );
                     }
                     else
                     {
-                        m_outInfo.println( getRes().getString( 
-                            "          The bit depth of this JVM could not be determined." ) );
+                        m_outInfo.println( "          The bit depth of this JVM could not be determined." );
                     }
-                    m_outInfo.println( getRes().getString( 
-                        "          Reported cause:" ) );
-                    m_outInfo.println(
-                        "            " + error );
+                    m_outInfo.println( "          Reported cause:" );
+                    m_outInfo.println( "            " + error );
                 }
             }
-            m_outInfo.println( getRes().getString( 
-                    "          System signals will not be handled correctly." ) );
+            // This message is logged when localization is unavailable.
+            m_outInfo.println( "          System signals will not be handled correctly." );
             m_outInfo.println();
         }
     }
@@ -1687,19 +1681,13 @@ public final class WrapperManager
         
         if ( !WrapperInfo.getVersion().equals( wrapperVersion ) )
         {
-            m_outInfo.println(getRes().getString( 
-                "WARNING - The Wrapper jar file currently in use is version \"{0}\"" ,
-                WrapperInfo.getVersion() ) );
-            m_outInfo.println(getRes().getString( 
-                "          while the version of the Wrapper which launched this JVM is " ) );
-            m_outInfo.println(
-                "          \"" + wrapperVersion + "\"." );
-            m_outInfo.println( getRes().getString( 
-                "          The Wrapper may appear to work correctly but some features may" ) );
-            m_outInfo.println( getRes().getString( 
-                "          not function correctly.  This configuration has not been tested" ) );
-            m_outInfo.println( getRes().getString( 
-                "          and is not supported." ) );
+            // This message is logged when localization is not yet initialized.
+            m_outInfo.println( "WARNING - The Wrapper jar file currently in use is version \"" + WrapperInfo.getVersion() + "\"" );
+            m_outInfo.println( "          while the version of the Wrapper which launched this JVM is" );
+            m_outInfo.println( "          \"" + wrapperVersion + "\"." );
+            m_outInfo.println( "          The Wrapper may appear to work correctly but some features may" );
+            m_outInfo.println( "          not function correctly.  This configuration has not been tested" );
+            m_outInfo.println( "          and is not supported." );
             m_outInfo.println();
         }
     }
@@ -1737,16 +1725,9 @@ public final class WrapperManager
         if ( !wrapperVersion.equals( jniVersion ) )
         {
             m_outInfo.println( getRes().getString( 
-                "WARNING - The version of the Wrapper which launched this JVM is " ) );
-            m_outInfo.println( getRes().getString( 
-                "          \"{0}\" while the version of the native library ", wrapperVersion ) );
-            m_outInfo.println(getRes().getString(                 "          is \"{0}\"." ,jniVersion ) );
+                "WARNING - The version of the Wrapper which launched this JVM is\n          \"{0}\" while the version of the native library\n          is \"{1}\".", wrapperVersion, jniVersion ) );
             m_outInfo.println(getRes().getString( 
-                "          The Wrapper may appear to work correctly but some features may" ) );
-            m_outInfo.println( getRes().getString( 
-                "          not function correctly.  This configuration has not been tested" ) );
-            m_outInfo.println( getRes().getString( 
-                "          and is not supported." ) );
+                "          The Wrapper may appear to work correctly but some features may\n          not function correctly.  This configuration has not been tested\n          and is not supported." ) );
             m_outInfo.println();
         }
     }
@@ -1998,9 +1979,11 @@ public final class WrapperManager
      * @throws SecurityException If a SecurityManager is present and its
      *                           checkExec method doesn't allow creation of a
      *                           subprocess.    
-     * @throws WrapperJNIError If the native library has not been loaded.
+     * @throws WrapperJNIError If the native library has not been loaded or is in the
+     *                         process of shutting down.
      * @throws WrapperLicenseError If the function is called other than in
-     *                             the Professional Edition or from a Standalone JVM.
+     *                             the Professional Edition or if the native
+     *                             library has not been loaded.
      * @throws UnsatisfiedLinkError If the posix_spawn function couldn't be found
      *
      * @see #isProfessionalEdition()
@@ -2051,9 +2034,11 @@ public final class WrapperManager
      * @throws SecurityException If a SecurityManager is present and its
      *                           checkExec method doesn't allow creation of a
      *                           subprocess.
-     * @throws WrapperJNIError If the native library has not been loaded.
+     * @throws WrapperJNIError If the native library has not been loaded or is in the
+     *                         process of shutting down.
      * @throws WrapperLicenseError If the function is called other than in
-     *                             the Professional Edition or from a Standalone JVM.
+     *                             the Professional Edition or if the native
+     *                             library has not been loaded.
      * @throws UnsatisfiedLinkError If the posix_spawn function couldn't be found
      *
      * @see #isProfessionalEdition()
@@ -2102,9 +2087,11 @@ public final class WrapperManager
      *                           subprocess.    
      * @throws IllegalArgumentException If there are any problems with the
      *                                  WrapperProcessConfig object.
-     * @throws WrapperJNIError If the native library has not been loaded.
+     * @throws WrapperJNIError If the native library has not been loaded or is in the
+     *                         process of shutting down.
      * @throws WrapperLicenseError If the function is called other than in
-     *                             the Professional Edition or from a Standalone JVM.
+     *                             the Professional Edition or if the native
+     *                             library has not been loaded.
      * @throws UnsatisfiedLinkError If the posix_spawn function couldn't be found
      *
      * @see #isProfessionalEdition()
@@ -2159,9 +2146,11 @@ public final class WrapperManager
      *                           subprocess.
      * @throws IllegalArgumentException If there are any problems with the
      *                                  WrapperProcessConfig object.
-     * @throws WrapperJNIError If the native library has not been loaded.
+     * @throws WrapperJNIError If the native library has not been loaded or is in the
+     *                         process of shutting down.
      * @throws WrapperLicenseError If the function is called other than in
-     *                             the Professional Edition or from a Standalone JVM.
+     *                             the Professional Edition or if the native
+     *                             library has not been loaded.
      * @throws UnsatisfiedLinkError If the posix_spawn function couldn't be found
      *
      * @see #isProfessionalEdition()
@@ -2170,7 +2159,7 @@ public final class WrapperManager
     public static WrapperProcess exec( String[] cmdArray, WrapperProcessConfig config )
         throws SecurityException, IOException, NullPointerException, IndexOutOfBoundsException, IllegalArgumentException, WrapperJNIError, WrapperLicenseError, UnsatisfiedLinkError
     {
-            return exec( cmdArray, null, config );
+        return exec( cmdArray, null, config );
     }
 
     /**
@@ -2183,10 +2172,7 @@ public final class WrapperManager
         //  Then both the cmdArray and cmdLine will be passed off to the native code.
         //  The cmdLine may be null.
         
-        if ( !isProfessionalEdition() )
-        {
-            throw new WrapperLicenseError( getRes().getString( "Requires the Professional Edition." ) );
-        }
+        assertProfessionalEdition();
         
         if ( ( cmdArray == null ) && ( cmdLine == null ) )
         {
@@ -2214,60 +2200,85 @@ public final class WrapperManager
             sm.checkExec( cmdArray[0] );
         }
         
-        if ( isNativeLibraryOk() )
+        // Keep track of how many threads are trying to execute child processes.
+        //  This is critical to avoid notification failures on shutdown.
+        synchronized( WrapperManager.class )
         {
-            for ( int i = 0; i < cmdArray.length; i++ )
+            m_runningExecs++;
+        }
+        try
+        {
+            if ( isNativeLibraryOk() )
             {
-                if ( cmdArray[i] == null )
+                for ( int i = 0; i < cmdArray.length; i++ )
                 {
-                    throw new NullPointerException( getRes().getString( "cmdarray[{0}]: Invalid element (isNull).",
-                            new Integer( i)  ) );
-                }
-            }
-            
-            // On UNIX platforms, we want to try and make sure the command is
-            //  valid before we run it to avoid problems later.  Not necessary
-            //  on Windows.
-            if ( !m_windows )
-            {
-                if ( !new File( cmdArray[0] ).exists() )
-                {
-                    boolean found = false;
-                    String path = nativeWrapperGetEnv( "PATH" );
-                    if ( path != null )
+                    if ( cmdArray[i] == null )
                     {
-                        String[] paths = path.split( File.pathSeparator );
-                        
-                        for ( int i = 0; i < paths.length; i++ )
+                        throw new NullPointerException( getRes().getString( "cmdarray[{0}]: Invalid element (isNull).",
+                                new Integer( i)  ) );
+                    }
+                }
+                
+                // On UNIX platforms, we want to try and make sure the command is
+                //  valid before we run it to avoid problems later.  Not necessary
+                //  on Windows.
+                if ( !m_windows )
+                {
+                    if ( !new File( cmdArray[0] ).exists() )
+                    {
+                        boolean found = false;
+                        String path = nativeWrapperGetEnv( "PATH" );
+                        if ( path != null )
                         {
-                            File file = new File( paths[i] + File.separator + cmdArray[0] );
-                            // m_outInfo.println( blu.getPath() );
-                            if ( file.exists() ) 
+                            String[] paths = path.split( File.pathSeparator );
+                            
+                            for ( int i = 0; i < paths.length; i++ )
                             {
-                                cmdArray[0] = file.getPath();
-                                found = true;
-                                break;
+                                File file = new File( paths[i] + File.separator + cmdArray[0] );
+                                // m_outInfo.println( blu.getPath() );
+                                if ( file.exists() ) 
+                                {
+                                    cmdArray[0] = file.getPath();
+                                    found = true;
+                                    break;
+                                }
                             }
                         }
-                    }
-                    if ( !found )
-                    {
-                        throw new IOException(getRes().getString( "''{0}'' not found." , cmdArray[0]  ) ); 
+                        if ( !found )
+                        {
+                            throw new IOException(getRes().getString( "''{0}'' not found." , cmdArray[0]  ) ); 
+                        }
                     }
                 }
-            }
-            if ( m_debug ) 
-            {
-                for ( int j = 0; j < cmdArray.length; j++ )
+                if ( m_debug ) 
                 {
-                    m_outDebug.println( "args[" + j+ "] = " + cmdArray[j] );
+                    for ( int j = 0; j < cmdArray.length; j++ )
+                    {
+                        m_outDebug.println( "args[" + j + "] = " + cmdArray[j] );
+                    }
+                }
+                return nativeExec( cmdArray, cmdLine, config.setEnvironment( config.getEnvironment() ), WrapperSystemPropertyUtil.getBooleanProperty( "wrapper.child.allowCWDOnSpawn", false ) );
+            } else {
+                if ( m_stopped ) {
+                    // This message is logged when localization is no longer available.
+                    throw new WrapperJNIError( "Wrapper native library shutting down." );
+                } else {
+                    // This message is logged when localization is not available.
+                    throw new WrapperJNIError( "Wrapper native library not loaded." );
                 }
             }
-            return nativeExec( cmdArray, cmdLine, config.setEnvironment( config.getEnvironment() ), WrapperSystemPropertyUtil.getBooleanProperty( "wrapper.child.allowCWDOnSpawn", false ) );
-        } else {
-            throw new WrapperJNIError( getRes().getString( "Wrapper native library not loaded." ) );
         }
-        
+        finally
+        {
+            synchronized( WrapperManager.class )
+            {
+                m_runningExecs--;
+                if ( m_runningExecs <= 0 )
+                {
+                    WrapperManager.class.notifyAll();
+                }
+            }
+        }
     }
     
     /**
@@ -2280,6 +2291,31 @@ public final class WrapperManager
     public static boolean isNativeLibraryOk()
     {
         return m_libraryOK && ( !m_stopped );
+    }
+    
+    /**
+     * Asserts that the Professional Edition of the Wrapper is being used and
+     *  that the native library is available.
+     *
+     * @throws WrapperLicenseError If the function is called other than in
+     *                             the Professional Edition or if the native
+     *                             library has not been loaded.
+     */
+    static void assertProfessionalEdition()
+        throws WrapperLicenseError
+    {
+        if ( !m_libraryOK )
+        {
+            throw new WrapperLicenseError( getRes().getString( "Requires that the Professional Edition native library be loaded.  Please check for errors earlier in the log." ) );
+        }
+        else if ( m_stopped )
+        {
+            throw new WrapperLicenseError( getRes().getString( "Requires that the Professional Edition native library be loaded, but it has already been unloaded as part of the shutdown process." ) );
+        }
+        else if ( !isProfessionalEdition() )
+        {
+            throw new WrapperLicenseError( getRes().getString( "Requires the Professional Edition." ) );
+        }
     }
     
     /**
@@ -2310,6 +2346,8 @@ public final class WrapperManager
      * Returns true if the current Wrapper edition has support for Professional
      *  Edition features.
      *
+     * False will also be returned if the native library has not been initialized correctly.
+     *
      * @return True if professional features are supported.
      */
     public static boolean isProfessionalEdition()
@@ -2322,6 +2360,8 @@ public final class WrapperManager
      * Returns true if the current Wrapper edition has support for Standard
      *  Edition features.
      *
+     * False will also be returned if the native library has not been initialized correctly.
+     *
      * @return True if standard features are supported.
      */
     public static boolean isStandardEdition()
@@ -2331,14 +2371,15 @@ public final class WrapperManager
     }
     
     /**
-     *  Fires a user event user_n specified in the conf file
+     * Fires a user event user_n specified in the conf file
      *
-     *  @throws SecurityException If a SecurityManager is present and the
+     * @throws SecurityException If a SecurityManager is present and the
      *                           calling thread does not have the
      *                           WrapperPermission("fireUserEvent")
      *                           permission.
-     *  @throws WrapperLicenseError If the function is called other than in
-     *                             the Professional Edition or from a Standalone JVM.
+     * @throws WrapperLicenseError If the function is called other than in
+     *                             the Professional Edition or if the native
+     *                             library has not been loaded.
      */
     public static void fireUserEvent( int eventNr )
     {
@@ -2350,10 +2391,8 @@ public final class WrapperManager
         if ( eventNr <= 0 || eventNr > 32767 ) {
             throw new java.lang.IllegalArgumentException( getRes().getString( "The user-event number must be in the range of 1-32767." ) );
         }
-        if ( !isProfessionalEdition() )
-        {
-            throw new WrapperLicenseError( getRes().getString( "Requires the Professional Edition." ) );
-        }
+        assertProfessionalEdition();
+        
         sendCommand( WRAPPER_MSG_FIRE_USER_EVENT, String.valueOf( eventNr ) );
     }
 
@@ -4579,13 +4618,21 @@ public final class WrapperManager
         }
         fireWrapperEvent( controlEvent );
         
-        if ( !controlEvent.isConsumed() )
+        if ( ignore )
         {
-            if ( ignore )
+            // Event will always be consumed.
+            if ( m_debug )
+            {
+                m_outDebug.println( getRes().getString( "Ignoring control event({0})", eventName ) );
+            }
+        }
+        else
+        {
+            if ( controlEvent.isConsumed() )
             {
                 if ( m_debug )
                 {
-                    m_outDebug.println( getRes().getString( "Ignoring control event({0})", eventName ) );
+                    m_outDebug.println(getRes().getString( "Control event({0}) was consumed by user listener.", eventName ) );
                 }
             }
             else
@@ -4948,6 +4995,30 @@ public final class WrapperManager
             {
                 m_outDebug.println( getRes().getString( "Closing backend connection." ) );
             }
+            
+            // To avoid the case where a child process is launched by we fail to notify the Wrapper,
+            //  we need to wait until there are no longer any child processes in the process of being launched.
+            long start = System.currentTimeMillis();
+            while ( m_runningExecs > 0 )
+            {
+                if ( m_debug )
+                {
+                    m_outDebug.println( getRes().getString( "Waiting for {0} threads to fininish launching child processes...", new Integer( m_runningExecs ) ) );
+                }
+                try
+                {
+                    WrapperManager.class.wait( 1000 );
+                }
+                catch ( InterruptedException e )
+                {
+                }
+                if ( System.currentTimeMillis() - start > 30000 )
+                {
+                    m_outError.println( getRes().getString( "Timed out waiting for {0} threads to fininish launching child processes.", new Integer( m_runningExecs ) ) );
+                    break;
+                }
+            }
+            
             // Clear the connected flag first so other threads will recognize that we
             //  are closing correctly.
             m_backendConnected = false;
@@ -5149,6 +5220,12 @@ public final class WrapperManager
         return name;
     }
     
+    /**
+     * Send a command to the Wrapper.
+     *
+     * @param code Command to send.
+     * @param message Message to send with the command.
+     */
     private static synchronized void sendCommand( byte code, String message )
     {
         if ( m_debug )
@@ -5177,6 +5254,7 @@ public final class WrapperManager
             }
         }
         
+        boolean sentCommand = false;
         if ( m_appearHung )
         {
             // The WrapperManager is attempting to make the JVM appear hung, so do nothing
@@ -5214,6 +5292,8 @@ public final class WrapperManager
 
                     m_backendOS.write( m_commandBuffer, 0, len );
                     m_backendOS.flush();
+                    
+                    sentCommand = true;
                 }
                 catch ( IOException e )
                 {
@@ -5221,6 +5301,27 @@ public final class WrapperManager
                     e.printStackTrace( m_outError );
                     closeBackend();
                 }
+            }
+        }
+        
+        if ( !sentCommand )
+        {
+            // We failed to send a command.  Some commands require that we log it as it could cause later problems.
+            switch ( code )
+            {
+            case WRAPPER_MSG_CHILD_LAUNCH:
+                m_outError.println( getRes().getString( "Failed to notify the Wrapper process that child with PID={0} was launched.  The Wrapper will not be able to make sure it is terminated when the Java process exits.", message ) );
+                break;
+                
+            case WRAPPER_MSG_CHILD_TERM:
+                if ( m_debug )
+                {
+                    m_outDebug.println( getRes().getString( "Failed to notify the Wrapper process that child with PID={0} completed.  The Wrapper will recover on its own.", message ) );
+                }
+                break;
+                
+            default:
+                break;
             }
         }
     }

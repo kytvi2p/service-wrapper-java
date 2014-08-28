@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999, 2013 Tanuki Software, Ltd.
+ * Copyright (c) 1999, 2014 Tanuki Software, Ltd.
  * http://www.tanukisoftware.com
  * All rights reserved.
  *
@@ -18,25 +18,26 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #ifdef WIN32
-#include <errno.h>
-#include <tchar.h>
-#include <io.h>
+ #include <errno.h>
+ #include <tchar.h>
+ #include <io.h>
 #else
-#include <stdlib.h>
-#include <string.h>
-#include <glob.h>
-#include <unistd.h>
-#include <limits.h>
-#include <langinfo.h>
-#if defined(IRIX)
-#define PATH_MAX FILENAME_MAX
-#endif
+ #include <stdlib.h>
+ #include <string.h>
+ #include <glob.h>
+ #include <unistd.h>
+ #include <limits.h>
+ #include <langinfo.h>
+ #if defined(IRIX)
+  #define PATH_MAX FILENAME_MAX
+ #endif
 #endif
 
 #include "wrapper_file.h"
 #include "logger.h"
 #include "wrapper_i18n.h"
 #include "wrapper.h"
+#include "property.h"
 
 #define FILES_CHUNK 5
 
@@ -49,6 +50,19 @@
 #endif
 
 #define MAX_INCLUDE_DEPTH 10
+
+/* Structure used by configFileReader to read files. */
+typedef struct ConfigFileReader ConfigFileReader;
+struct ConfigFileReader {
+    ConfigFileReader_Callback callback;
+    void *callbackParam;
+    int enableIncludes;
+    int preload;
+    /* debugIncludes controls whether or not debug output is logged.  It is set using directives in the file being read. */
+    int debugIncludes;
+    /* debugProperties controls whether or not debug output is logged.  It is set using directives in the file being read. */
+    int debugProperties;
+};
 
 /**
  * Returns a valid sort mode given a name: "TIMES", "NAMES_ASC", "NAMES_DEC".
@@ -322,7 +336,12 @@ TCHAR** wrapperFileGetFiles(const TCHAR* pattern, int sortMode) {
 #endif
 
     /* Get the first file. */
+#ifdef _IA64_
+    /* On Itanium, the first parameter is not a "const". If you don't cast it, then you have a warning */
+    if ((handle = _tfindfirst64((TCHAR *)pattern, &fblock)) > 0) {
+#else
     if ((handle = _tfindfirst64(pattern, &fblock)) > 0) {
+#endif
         if ((_tcscmp(fblock.name, TEXT(".")) != 0) && (_tcscmp(fblock.name, TEXT("..")) != 0)) {
             fileLen = _tcslen(fblock.name);
             files[cnt] = malloc((_tcslen(dirPart) + _tcslen(fblock.name) + 1) * sizeof(TCHAR));
@@ -668,34 +687,6 @@ void wrapperFileTests() {
 
 
 /**
- * Call functions in property.c temporarily.
- */
-extern void evaluateEnvironmentVariables(const TCHAR *propertyValue, TCHAR *buffer, int bufferLength, int warnUndefinedVars, void *warnedUndefVarMap, int warnLogLevel);
-#ifdef WIN32
-#define strIgnoreCaseCmp _stricmp
-extern int getEncodingByName(char* encodingMB, int *encoding);
-#else
-#define strIgnoreCaseCmp strcasecmp
-extern int getEncodingByName(char* encodingMB, char** encoding);
-#endif
-
-/**
- * Initialize `reader'
- */
-void configFileReader_Initialize(ConfigFileReader *reader,
-                 ConfigFileReader_Callback callback,
-                 void *callbackParam,
-                 int enableIncludes)
-{
-    reader->callback = callback;
-    reader->callbackParam = callbackParam;
-    reader->enableIncludes = enableIncludes;
-    reader->debugIncludes = FALSE;
-    reader->debugProperties = FALSE;
-    reader->preload = FALSE;
-}
-
-/**
  * Read configuration file.
  */
 int configFileReader_Read(ConfigFileReader *reader,
@@ -987,7 +978,7 @@ int configFileReader_Read(ConfigFileReader *reader,
                         log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS,
                             TEXT("Found #include file in %s: %s"), filename, c);
                     }
-                    evaluateEnvironmentVariables(c, expBuffer, MAX_PROPERTY_NAME_VALUE_LENGTH, FALSE, NULL, LEVEL_WARN);
+                    evaluateEnvironmentVariables(c, expBuffer, MAX_PROPERTY_NAME_VALUE_LENGTH, properties->logWarnings, properties->warnedVarMap, properties->logWarningLogLevel);
 
                     if (reader->debugIncludes && (_tcscmp(c, expBuffer) != 0)) {
                         /* Only show this log if there were any environment variables. */
@@ -1027,7 +1018,7 @@ int configFileReader_Read(ConfigFileReader *reader,
                     if (!absoluteBuffer) {
                         outOfMemory(TEXT("RCF"), 2);
                     } else {
-                        if (_trealpath(expBuffer, absoluteBuffer) == NULL) {
+                        if (_trealpathN(expBuffer, absoluteBuffer, PATH_MAX + 1) == NULL) {
                             if (reader->debugIncludes || includeRequired) {
                                 log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_STATUS,
                                     TEXT("Unable to resolve the full path of included configuration file: %s (%s)\n  Referenced from: %s (line %d)\n  Current working directory: %s"),
@@ -1110,6 +1101,42 @@ int configFileReader_Read(ConfigFileReader *reader,
     fclose(stream);
 
     return readResult;
+}
+
+/**
+ * Reads configuration lines from the file `filename' and calls `callback' with the line and
+ *  `callbackParam' specified to its arguments.
+ *
+ * @param filename Name of configuration file to read.
+ * @param fileRequired TRUE if the file specified by filename is required, FALSE if a missing
+ *                     file will silently fail.
+ * @param callback Pointer to a callback funtion which will be called for each line read.
+ * @param callbackParam Pointer to additional user data which will be passed to the callback.
+ * @param enableIncludes If TRUE then includes will be supported.
+ * @param preload TRUE if this is being called in the preload step meaning that all errors
+ *                should be suppressed.
+ *
+ * @return CONFIG_FILE_READER_SUCCESS if the file was read successfully,
+ *         CONFIG_FILE_READER_FAIL if there were any problems at all, or
+ *         CONFIG_FILE_READER_HARD_FAIL if the problem should cascaded all the way up.
+ */
+int configFileReader(const TCHAR *filename,
+                     int fileRequired,
+                     ConfigFileReader_Callback callback,
+                     void *callbackParam,
+                     int enableIncludes,
+                     int preload) {
+    ConfigFileReader reader;
+    
+    /* Initialize the reader. */
+    reader.callback = callback;
+    reader.callbackParam = callbackParam;
+    reader.enableIncludes = enableIncludes;
+    reader.preload = preload;
+    reader.debugIncludes = FALSE;
+    reader.debugProperties = FALSE;
+    
+    return configFileReader_Read(&reader, filename, fileRequired, 0, NULL, 0);
 }
 
 

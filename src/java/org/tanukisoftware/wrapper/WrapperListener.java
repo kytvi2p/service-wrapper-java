@@ -1,7 +1,7 @@
 package org.tanukisoftware.wrapper;
 
 /*
- * Copyright (c) 1999, 2013 Tanuki Software, Ltd.
+ * Copyright (c) 1999, 2014 Tanuki Software, Ltd.
  * http://www.tanukisoftware.com
  * All rights reserved.
  *
@@ -143,7 +143,7 @@ public interface WrapperListener
      *   public void controlEvent( int event )
      *   {
      *       if ( ( event == WrapperManager.WRAPPER_CTRL_LOGOFF_EVENT )
-     *           && ( WrapperManager.isLaunchedAsService() || WrapperManager.isIgnoreConsoleLogouts() ) )
+     *           && ( WrapperManager.isLaunchedAsService() || WrapperManager.isIgnoreUserLogoffs() ) )
      *       {
      *           // Ignore
      *       }

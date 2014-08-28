@@ -153,6 +153,7 @@ extern "C" {
 /* Inaccessible static: m_shutdownJVMComplete */
 /* Inaccessible static: m_shutdownLockMap */
 /* Inaccessible static: m_shutdownLocks */
+/* Inaccessible static: m_runningExecs */
 /* Inaccessible static: m_args */
 /* Inaccessible static: m_backendType */
 /* Inaccessible static: m_backendConnected */

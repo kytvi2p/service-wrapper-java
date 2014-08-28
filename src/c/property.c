@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999, 2013 Tanuki Software, Ltd.
+ * Copyright (c) 1999, 2014 Tanuki Software, Ltd.
  * http://www.tanukisoftware.comment
  * All rights reserved.
  *
@@ -29,7 +29,7 @@
 
 #if defined(MACOSX) || defined(FREEBSD)
 #else
-#include <malloc.h>
+ #include <malloc.h>
 #endif
 
 #include <stdio.h>
@@ -38,20 +38,17 @@
 #include <time.h>
 
 #ifdef WIN32
-#include <errno.h>
+ #include <errno.h>
 
 /* MS Visual Studio 8 went and deprecated the POXIX names for functions.
  *  Fixing them all would be a big headache for UNIX versions. */
-#pragma warning(disable : 4996)
+ #pragma warning(disable : 4996)
 
 #else
-#include <strings.h>
-#include <limits.h>
-#include <sys/time.h>
-#include <langinfo.h>
-#if defined(IRIX)
-#define PATH_MAX FILENAME_MAX
-#endif
+ #include <strings.h>
+ #include <limits.h>
+ #include <sys/time.h>
+ #include <langinfo.h>
 #endif
 #include "wrapper_i18n.h"
 #include "logger.h"
@@ -199,27 +196,30 @@ TCHAR generateValueBuffer[256];
 
 /**
  * This function returns a reference to a static buffer and is NOT thread safe.
+ *  It is currently called only when loading a property file and when firing an event.
+ *  Both happen in the main thread.
+ * The largest return value can be 15+1 characters.
  */
-TCHAR* generateTimeValue(const TCHAR* format) {
+TCHAR* generateTimeValue(const TCHAR* format, struct tm *timeTM) {
     if (strcmpIgnoreCase(format, TEXT("YYYYMMDDHHIISS")) == 0) {
         _sntprintf(generateValueBuffer, 256, TEXT("%04d%02d%02d%02d%02d%02d"),
-        loadPropertiesTM.tm_year + 1900, loadPropertiesTM.tm_mon + 1, loadPropertiesTM.tm_mday,
-        loadPropertiesTM.tm_hour, loadPropertiesTM.tm_min, loadPropertiesTM.tm_sec );
+        timeTM->tm_year + 1900, timeTM->tm_mon + 1, timeTM->tm_mday,
+        timeTM->tm_hour, timeTM->tm_min, timeTM->tm_sec );
     } else if (strcmpIgnoreCase(format, TEXT("YYYYMMDD_HHIISS")) == 0) {
         _sntprintf(generateValueBuffer, 256, TEXT("%04d%02d%02d_%02d%02d%02d"),
-        loadPropertiesTM.tm_year + 1900, loadPropertiesTM.tm_mon + 1, loadPropertiesTM.tm_mday,
-        loadPropertiesTM.tm_hour, loadPropertiesTM.tm_min, loadPropertiesTM.tm_sec );
+        timeTM->tm_year + 1900, timeTM->tm_mon + 1, timeTM->tm_mday,
+        timeTM->tm_hour, timeTM->tm_min, timeTM->tm_sec );
     } else if (strcmpIgnoreCase(format, TEXT("YYYYMMDDHHII")) == 0) {
         _sntprintf(generateValueBuffer, 256, TEXT("%04d%02d%02d%02d%02d"),
-        loadPropertiesTM.tm_year + 1900, loadPropertiesTM.tm_mon + 1, loadPropertiesTM.tm_mday,
-        loadPropertiesTM.tm_hour, loadPropertiesTM.tm_min );
+        timeTM->tm_year + 1900, timeTM->tm_mon + 1, timeTM->tm_mday,
+        timeTM->tm_hour, timeTM->tm_min );
     } else if (strcmpIgnoreCase(format, TEXT("YYYYMMDDHH")) == 0) {
         _sntprintf(generateValueBuffer, 256, TEXT("%04d%02d%02d%02d"),
-        loadPropertiesTM.tm_year + 1900, loadPropertiesTM.tm_mon + 1, loadPropertiesTM.tm_mday,
-        loadPropertiesTM.tm_hour );
+        timeTM->tm_year + 1900, timeTM->tm_mon + 1, timeTM->tm_mday,
+        timeTM->tm_hour );
     } else if (strcmpIgnoreCase(format, TEXT("YYYYMMDD")) == 0) {
         _sntprintf(generateValueBuffer, 256, TEXT("%04d%02d%02d"),
-        loadPropertiesTM.tm_year + 1900, loadPropertiesTM.tm_mon + 1, loadPropertiesTM.tm_mday);
+        timeTM->tm_year + 1900, timeTM->tm_mon + 1, timeTM->tm_mday);
     } else {
         _sntprintf(generateValueBuffer, 256, TEXT("{INVALID}"));
     }
@@ -228,6 +228,9 @@ TCHAR* generateTimeValue(const TCHAR* format) {
 
 /**
  * This function returns a reference to a static buffer and is NOT thread safe.
+ *  It is currently called only when loading a property file and when firing an event.
+ *  Both happen in the main thread.
+ * The largest return value can be 9+1 characters.
  */
 TCHAR* generateRandValue(const TCHAR* format) {
     if (strcmpIgnoreCase(format, TEXT("N")) == 0) {
@@ -303,7 +306,7 @@ void evaluateEnvironmentVariables(const TCHAR *propertyValue, TCHAR *buffer, int
                 envValueNeedFree = FALSE;
                 if (_tcsstr(envName, TEXT("WRAPPER_TIME_")) == envName) {
                     /* Found a time value. */
-                    envValue = generateTimeValue(envName + 13);
+                    envValue = generateTimeValue(envName + 13, &loadPropertiesTM);
                 } else if (_tcsstr(envName, TEXT("WRAPPER_RAND_")) == envName) {
                     /* Found a time value. */
                     envValue = generateRandValue(envName + 13);
@@ -462,213 +465,6 @@ void setInnerProperty(Properties *properties, Property *property, const TCHAR *p
     }
 }
 
-/**
- * Function to get the system encoding name/number for the encoding
- * of the conf file
- *
- * @para String holding the encoding from the conf file
- *
- * @return TRUE if not found, FALSE otherwise
- *
- */
-#ifdef WIN32
-#define strIgnoreCaseCmp stricmp
-int getEncodingByName(char* encodingMB, int *encoding) {
-#else
-#define strIgnoreCaseCmp strcasecmp
-int getEncodingByName(char* encodingMB, char** encoding) {
-#endif
-    if (strIgnoreCaseCmp(encodingMB, "Shift_JIS") == 0) {
-#if defined(FREEBSD) || defined (AIX) || defined(MACOSX)
-        *encoding = "SJIS";
-#elif defined(WIN32)
-        *encoding = 932;
-#else
-        *encoding = "shiftjis";
-#endif
-    } else if (strIgnoreCaseCmp(encodingMB, "eucJP") == 0) {
-#if defined(AIX)
-        *encoding = "IBM-eucJP";
-#elif defined(WIN32)
-        *encoding = 20932;
-#else
-        *encoding = "eucJP";
-#endif
-    } else if (strIgnoreCaseCmp(encodingMB, "UTF-8") == 0) {
-#if defined(HPUX)
-        *encoding = "utf8";
-#elif defined(WIN32)
-        *encoding = 65001;
-#else
-        *encoding = "UTF-8";
-#endif
-    } else if (strIgnoreCaseCmp(encodingMB, "ISO-8859-1") == 0) {
-#if defined(WIN32)
-        *encoding = 28591;
-#elif defined(LINUX)
-        *encoding = "ISO-8859-1";
-#else
-        *encoding = "ISO8859-1";
-#endif
-    } else if (strIgnoreCaseCmp(encodingMB, "CP1252") == 0) {
-#if defined(WIN32)
-        *encoding = 1252;
-#else
-        *encoding = "CP1252";
-#endif
-    } else if (strIgnoreCaseCmp(encodingMB, "ISO-8859-2") == 0) {
-#if defined(WIN32)
-        *encoding = 28592;
-#elif defined(LINUX)
-        *encoding = "ISO-8859-2";
-#else
-        *encoding = "ISO8859-2";
-#endif
-    } else if (strIgnoreCaseCmp(encodingMB, "ISO-8859-3") == 0) {
-#if defined(WIN32)
-        *encoding = 28593;
-#elif defined(LINUX)
-        *encoding = "ISO-8859-3";
-#else
-        *encoding = "ISO8859-3";
-#endif
-    } else if (strIgnoreCaseCmp(encodingMB, "ISO-8859-4") == 0) {
-#if defined(WIN32)
-        *encoding = 28594;
-#elif defined(LINUX)
-        *encoding = "ISO-8859-4";
-#else
-        *encoding = "ISO8859-4";
-#endif
-    } else if (strIgnoreCaseCmp(encodingMB, "ISO-8859-5") == 0) {
-#if defined(WIN32)
-        *encoding = 28595;
-#elif defined(LINUX)
-        *encoding = "ISO-8859-5";
-#else
-        *encoding = "ISO8859-5";
-#endif
-    } else if (strIgnoreCaseCmp(encodingMB, "ISO-8859-6") == 0) {
-#if defined(WIN32)
-        *encoding = 28596;
-#elif defined(LINUX)
-        *encoding = "ISO-8859-6";
-#else
-        *encoding = "ISO8859-6";
-#endif
-    } else if (strIgnoreCaseCmp(encodingMB, "ISO-8859-7") == 0) {
-#if defined(WIN32)
-        *encoding = 28597;
-#elif defined(LINUX)
-        *encoding = "ISO-8859-7";
-#else
-        *encoding = "ISO8859-7";
-#endif
-    } else if (strIgnoreCaseCmp(encodingMB, "ISO-8859-8") == 0) {
-#if defined(WIN32)
-        *encoding = 28598;
-#elif defined(LINUX)
-        *encoding = "ISO-8859-8";
-#else
-        *encoding = "ISO8859-8";
-#endif
-    } else if (strIgnoreCaseCmp(encodingMB, "ISO-8859-9") == 0) {
-#if defined(WIN32)
-        *encoding = 28599;
-#elif defined(LINUX)
-        *encoding = "ISO-8859-9";
-#else
-        *encoding = "ISO8859-9";
-#endif
-    } else if (strIgnoreCaseCmp(encodingMB, "ISO-8859-10") == 0) {
-#if defined(WIN32)
-        *encoding = 28600;
-#elif defined(LINUX)
-        *encoding = "ISO-8859-10";
-#else
-        *encoding = "ISO8859-10";
-#endif
-    } else if (strIgnoreCaseCmp(encodingMB, "ISO-8859-11") == 0) {
-#if defined(WIN32)
-        *encoding = 28601;
-#elif defined(LINUX)
-        *encoding = "ISO-8859-11";
-#else
-        *encoding = "ISO8859-11";
-#endif
-    } else if (strIgnoreCaseCmp(encodingMB, "ISO-8859-13") == 0) {
-#if defined(WIN32)
-        *encoding = 28603;
-#elif defined(LINUX)
-        *encoding = "ISO-8859-13";
-#else
-        *encoding = "ISO8859-13";
-#endif
-    } else if (strIgnoreCaseCmp(encodingMB, "ISO-8859-14") == 0) {
-#if defined(WIN32)
-        *encoding = 28604;
-#elif defined(LINUX)
-        *encoding = "ISO-8859-14";
-#else
-        *encoding = "ISO8859-14";
-#endif
-    } else if (strIgnoreCaseCmp(encodingMB, "ISO-8859-15") == 0) {
-#if defined(WIN32)
-        *encoding = 28605;
-#elif defined(LINUX)
-        *encoding = "ISO-8859-15";
-#else
-        *encoding = "ISO8859-15";
-#endif
-    } else if (strIgnoreCaseCmp(encodingMB, "ISO-8859-16") == 0) {
-#if defined(WIN32)
-        *encoding = 28606;
-#elif defined(LINUX)
-        *encoding = "ISO-8859-16";
-#else
-        *encoding = "ISO8859-16";
-#endif
-    } else if (strIgnoreCaseCmp(encodingMB, "CP1250") == 0) {
-#if defined(WIN32)
-        *encoding = 1250;
-#else
-        *encoding = "CP1250";
-#endif
-    } else if (strIgnoreCaseCmp(encodingMB, "CP1251") == 0) {
-#if defined(WIN32)
-        *encoding = 1251;
-#else
-        *encoding = "CP1251";
-#endif
-    } else if (strIgnoreCaseCmp(encodingMB, "KOI8-R") == 0) {
-#if defined(WIN32)
-        *encoding = 20866;
-#else
-        *encoding = "KOI8-R";
-#endif
-    } else if (strIgnoreCaseCmp(encodingMB, "KOI8-U") == 0) {
-#if defined(WIN32)
-        *encoding = 21866;
-#else
-        *encoding = "KOI8-U";
-#endif
-    } else if (strIgnoreCaseCmp(encodingMB, "DEFAULT") == 0) {
-#ifdef WIN32
-            *encoding = GetACP();
-#else 
-            *encoding = nl_langinfo(CODESET);
- #ifdef MACOSX
-            if (strlen(*encoding) == 0) {
-                *encoding = "UTF-8";
-            }
- #endif
-#endif
-    } else {
-        return TRUE;
-    }
-    return FALSE;
-}
-
 static int loadPropertiesCallback(void *callbackParam, const TCHAR *fileName, int lineNumber, TCHAR *config, int debugProperties)
 {
     Properties *properties = (Properties *)callbackParam;
@@ -709,13 +505,12 @@ int loadProperties(Properties *properties, const TCHAR* filename, int preload) {
     #else
     struct timeval timevalNow;
     #endif
-    time_t      now;
-    struct tm   *nowTM;
-    ConfigFileReader reader;
+    time_t now;
+    struct tm *nowTM;
     int loadResult;
     
 #ifdef WIN32
-    _ftime( &timebNow );
+    _ftime(&timebNow);
     now = (time_t)timebNow.time;
 #else
     gettimeofday(&timevalNow, NULL);
@@ -724,12 +519,7 @@ int loadProperties(Properties *properties, const TCHAR* filename, int preload) {
     nowTM = localtime(&now);
     memcpy(&loadPropertiesTM, nowTM, sizeof(struct tm));
 
-    configFileReader_Initialize(&reader, loadPropertiesCallback, properties, TRUE);
-
-    /* Store the preload flag for this loading of properties. */
-    reader.preload = preload;
-
-    loadResult = configFileReader_Read(&reader, filename, 0, 0, NULL, 0);
+    loadResult = configFileReader(filename, FALSE, loadPropertiesCallback, properties, TRUE, preload);
 
     /* Any failure is a failure in the root. */
     switch (loadResult) {

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999, 2013 Tanuki Software, Ltd.
+ * Copyright (c) 1999, 2014 Tanuki Software, Ltd.
  * http://www.tanukisoftware.com
  * All rights reserved.
  *
@@ -40,7 +40,7 @@
 #include <sys/wait.h>
 #include <fcntl.h>
 #include <unistd.h>
-#include "wrapper_i18n.h"
+#include "loggerjni.h"
 #include "wrapperjni.h"
 
 static pid_t wrapperProcessId = -1;
@@ -162,7 +162,10 @@ Java_org_tanukisoftware_wrapper_WrapperManager_nativeInit(JNIEnv *env, jclass jC
     signal(SIGUSR2, handleUsr2);
     */
 
-    initCommon(env, jClassWrapperManager);
+    if (initCommon(env, jClassWrapperManager)) {
+        /* Failed.  An exception will have been thrown. */
+        return;
+    }
 
     /* Store the current process Id */
     wrapperProcessId = getpid();
