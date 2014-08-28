@@ -1,7 +1,7 @@
 package org.tanukisoftware.wrapper;
 
 /*
- * Copyright (c) 1999, 2013 Tanuki Software, Ltd.
+ * Copyright (c) 1999, 2014 Tanuki Software, Ltd.
  * http://www.tanukisoftware.com
  * All rights reserved.
  *
@@ -83,13 +83,16 @@ public class WrapperProcessOutputStream
      public void close()
         throws IOException
      {
-        if ( !m_closed )
+        synchronized( this )
         {
-            if ( WrapperManager.isNativeLibraryOk() )
+            if ( !m_closed )
             {
-                nativeClose();
+                if ( WrapperManager.isNativeLibraryOk() )
+                {
+                    nativeClose();
+                }
+                m_closed = true;
             }
-            m_closed = true;
         }
     }
 }

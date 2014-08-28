@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999, 2013 Tanuki Software, Ltd.
+ * Copyright (c) 1999, 2014 Tanuki Software, Ltd.
  * http://www.tanukisoftware.com
  * All rights reserved.
  *
@@ -13,7 +13,9 @@
 #include <windows.h>
 #include <tchar.h>
 #else
+#ifndef FREEBSD
 #include <iconv.h>
+#endif
 #include <langinfo.h>
 #include <errno.h>
 #include <limits.h>
@@ -23,7 +25,11 @@
 #include <assert.h>
 #include <sys/stat.h>
 #include <string.h>
-#include "wrapper_i18n.h"
+#include "logger_base.h"
+
+#if defined(IRIX)
+ #define PATH_MAX FILENAME_MAX
+#endif
 
 #ifndef TRUE
 #define TRUE -1
@@ -31,6 +37,20 @@
 
 #ifndef FALSE
 #define FALSE 0
+#endif
+
+/**
+ * Dynamically load the symbols for the iconv library
+ */
+#ifdef FREEBSD
+typedef void *iconv_t;
+static iconv_t (*wrapper_iconv_open)(const char *, const char *);  
+static size_t (*wrapper_iconv)(iconv_t, const char **, size_t *, char **, size_t *);  
+static int (*wrapper_iconv_close)(iconv_t);
+#else
+#define wrapper_iconv_open iconv_open
+#define wrapper_iconv iconv
+#define wrapper_iconv_close iconv_close
 #endif
 
 #if defined(UNICODE) && defined(WIN32)
@@ -139,7 +159,7 @@ int multiByteToWideChar(const char *multiByteChars, const char *multiByteEncodin
     /* First we need to convert from the multi-byte string to native. */
     /* If the multiByteEncoding and interumEncoding encodings are equal then there is nothing to do. */
     if (strcmp(multiByteEncoding, interumEncoding) != 0 && strcmp(interumEncoding, "646") != 0) {
-        conv_desc = iconv_open(interumEncoding, multiByteEncoding); /* convert multiByte encoding to interum-encoding*/
+        conv_desc = wrapper_iconv_open(interumEncoding, multiByteEncoding); /* convert multiByte encoding to interum-encoding*/
         if (conv_desc == (iconv_t)(-1)) {
             /* Initialization failure. */
             if (errno == EINVAL) {
@@ -200,7 +220,7 @@ int multiByteToWideChar(const char *multiByteChars, const char *multiByteEncodin
             /* Make a copy of the nativeCharLen as this call will replace it with the number of chars used. */
             nativeCharLenCopy = nativeCharLen;
             nativeCharStartCopy = nativeCharStart;
-            iconv_value = iconv(conv_desc, &multiByteCharsStart, &multiByteCharsLenStart, &nativeCharStartCopy, &nativeCharLenCopy);
+            iconv_value = wrapper_iconv(conv_desc, &multiByteCharsStart, &multiByteCharsLenStart, &nativeCharStartCopy, &nativeCharLenCopy);
              /* Handle failures. */
             if (iconv_value == (size_t)-1) {
                 /* See "man 3 iconv" for an explanation. */
@@ -251,7 +271,7 @@ int multiByteToWideChar(const char *multiByteChars, const char *multiByteEncodin
         } while (redoIConv);
         
         /* finish iconv */
-        if (iconv_close(conv_desc)) {
+        if (wrapper_iconv_close(conv_desc)) {
             free(nativeCharStart);
             errorTemplate = (localizeErrorMessage ? TEXT("Cleanup failure in iconv: %d") : TEXT("Cleanup failure in iconv: %d"));
             errorTemplateLen = _tcslen(errorTemplate) + 10 + 1;
@@ -270,7 +290,7 @@ int multiByteToWideChar(const char *multiByteChars, const char *multiByteEncodin
     }
 
     /* now store the result into a wchar_t */
-    wideCharLen = mbstowcs(NULL, nativeCharStart, 0);
+    wideCharLen = mbstowcs(NULL, nativeCharStart, MBSTOWCS_QUERY_LENGTH);
     if (wideCharLen == (size_t)-1) {
         if (didIConv) {
             free(nativeCharStart);
@@ -299,9 +319,7 @@ int multiByteToWideChar(const char *multiByteChars, const char *multiByteEncodin
         return TRUE;
     }
     mbstowcs(*outputBufferW, nativeCharStart, wideCharLen + 1);
-    
-    /* for sanity */
-    (*outputBufferW)[wideCharLen] = TEXT('\0');
+    (*outputBufferW)[wideCharLen] = TEXT('\0'); /* Avoid bufferflows caused by badly encoded characters. */
     
     /* free the native char */
     if (didIConv) {
@@ -325,7 +343,14 @@ size_t _treadlink(TCHAR* exe, TCHAR* fullPath, size_t size) {
         cFullPath = malloc (size);
         if (cFullPath) {
             req = readlink(cExe, cFullPath, size);
-            mbstowcs(fullPath, cFullPath, size);
+            req = mbstowcs(fullPath, cFullPath, size);
+            if (req == (size_t)-1) {
+                free(cFullPath);
+                free(cExe);
+                return (size_t)-1;
+            }
+            fullPath[size - 1] = TEXT('\0'); /* Avoid bufferflows caused by badly encoded characters. */
+            
             free(cFullPath);
             free(cExe);
             return req * sizeof(TCHAR);
@@ -342,11 +367,19 @@ size_t _treadlink(TCHAR* exe, TCHAR* fullPath, size_t size) {
  */
 TCHAR* _tgetcwd(TCHAR *buf, size_t size) {
     char* cBuf;
+    size_t len;
+    
     if (buf) {
         cBuf = malloc(size);
         if (cBuf) {
             if (getcwd(cBuf, size) != NULL) {
-                mbstowcs(buf, cBuf, size * sizeof(TCHAR));
+                len = mbstowcs(buf, cBuf, size);
+                if (len == (size_t)-1) {
+                    /* Failed. */
+                    free(cBuf);
+                    return NULL;
+                }
+                buf[size - 1] = TEXT('\0'); /* Avoid bufferflows caused by badly encoded characters. */
                 free(cBuf);
                 return buf;
             }
@@ -403,11 +436,12 @@ TCHAR *_tsetlocale(int category, const TCHAR *locale) {
         free(cLocale);
         
         if (cReturn) {
-            req = mbstowcs(NULL, cReturn, 0);
+            req = mbstowcs(NULL, cReturn, MBSTOWCS_QUERY_LENGTH);
             if (req != (size_t)-1) {
                 tReturn = malloc(sizeof(TCHAR) * (req + 1));
                 if (tReturn) {
                     mbstowcs(tReturn, cReturn, req + 1);
+                    tReturn[req] = TEXT('\0'); /* Avoid bufferflows caused by badly encoded characters. */
                     return tReturn;
                 }
             }
@@ -520,10 +554,15 @@ int _tremove(const TCHAR *path) {
     char* cPath;
     size_t req;
     int result;
-    req = wcstombs(NULL, path, 0) + 1;
-    cPath = malloc(req);
+
+    req = wcstombs(NULL, path, 0);
+    if (req == (size_t)-1) {
+        return -1;
+    }
+
+    cPath = malloc(req + 1);
     if (cPath) {
-        wcstombs(cPath, path, req);
+        wcstombs(cPath, path, req + 1);
         result = remove(cPath);
         free(cPath);
         return result;
@@ -538,15 +577,24 @@ int _trename(const TCHAR *path, const TCHAR *to) {
     int ret;
 
     ret = -1;
-    req = wcstombs(NULL, path, 0) + 1;
-    cPath = malloc(req);
-
+    req = wcstombs(NULL, path, 0);
+    if (req == (size_t)-1) {
+        return ret;
+    }
+    
+    cPath = malloc(req + 1);
     if (cPath) {
-        wcstombs(cPath, path, req);
-        req  = wcstombs(NULL, to, 0) + 1;
-        cTo = malloc(req);
+        wcstombs(cPath, path, req + 1);
+
+        req  = wcstombs(NULL, to, 0);
+        if (req == (size_t)-1) {
+            free(cPath);
+            return ret;
+        }
+        
+        cTo = malloc(req + 1);
         if (cTo) {
-            wcstombs(cTo, to, req);
+            wcstombs(cTo, to, req + 1);
             ret = rename(cPath, cTo);
             free(cTo);
         }
@@ -559,10 +607,14 @@ void _tsyslog(int priority, const TCHAR *message) {
     char* cMessage;
     size_t req;
 
-    req = wcstombs(NULL, message, 0) + 1;
-    cMessage = malloc(req);
+    req = wcstombs(NULL, message, 0);
+    if (req == (size_t)-1) {
+        return;
+    }
+
+    cMessage = malloc(req + 1);
     if (cMessage) {
-        wcstombs(cMessage, message, req);
+        wcstombs(cMessage, message, req + 1);
         syslog(priority, "%s", cMessage);
         free(cMessage);
     }
@@ -581,20 +633,28 @@ TCHAR * _tgetenv( const TCHAR * name ) {
     size_t req;
     char *cVal;
 
-    req = wcstombs(NULL, name, 0) + 1;
-    cName = malloc(req);
+    req = wcstombs(NULL, name, 0);
+    if (req == (size_t)-1) {
+        return NULL;
+    }
+    cName = malloc(sizeof(char) * (req + 1));
     if (cName) {
-        wcstombs(cName, name, req);
+        wcstombs(cName, name, req + 1);
         cVal = getenv(cName);
         free(cName);
         if (cVal == NULL) {
             return NULL;
         }
-        req = mbstowcs(NULL, cVal, 0) + 1;
-        req *= sizeof(TCHAR);
-        val = malloc(req);
+        
+        req = mbstowcs(NULL, cVal, MBSTOWCS_QUERY_LENGTH);
+        if (req == (size_t)-1) {
+            /* Failed. */
+            return NULL;
+        }
+        val = malloc(sizeof(TCHAR) * (req + 1));
         if (val) {
-            mbstowcs(val, cVal, req);
+            mbstowcs(val, cVal, req + 1);
+            val[req] = TEXT('\0'); /* Avoid bufferflows caused by badly encoded characters. */
             return val;
         }
     }
@@ -607,14 +667,24 @@ FILE* _tfopen(const wchar_t* file, const wchar_t* mode) {
     char* cMode;
     FILE *f = NULL;
 
-    sizeFile = wcstombs(NULL, (wchar_t*)file, 0) + 1;
-    cFile= malloc(sizeFile);
+    sizeFile = wcstombs(NULL, (wchar_t*)file, 0);
+    if (sizeFile == (size_t)-1) {
+        return NULL;
+    }
+
+    cFile= malloc(sizeFile + 1);
     if (cFile) {
-        wcstombs(cFile, (wchar_t*) file, sizeFile);
-        sizeMode = wcstombs(NULL, (wchar_t*)mode, 0) + 1;
-        cMode= malloc(sizeMode);
+        wcstombs(cFile, (wchar_t*) file, sizeFile + 1);
+
+        sizeMode = wcstombs(NULL, (wchar_t*)mode, 0);
+        if (sizeMode == (size_t)-1) {
+            free(cFile);
+            return NULL;
+        }
+
+        cMode= malloc(sizeMode + 1);
         if (cMode) {
-            wcstombs(cMode, (wchar_t*) mode, sizeMode);
+            wcstombs(cMode, (wchar_t*) mode, sizeMode + 1);
             f = fopen(cFile, cMode);
             free(cMode);
         }
@@ -627,10 +697,14 @@ int _tunlink(const wchar_t* address) {
     int size;
     char *cAddress;
 
-    size = wcstombs(NULL, (wchar_t*)address, 0) + 1;
-    cAddress= malloc(size);
+    size = wcstombs(NULL, (wchar_t*)address, 0);
+    if (size == (size_t)-1) {
+        return -1;
+    }
+
+    cAddress= malloc(size + 1);
     if (cAddress) {
-        wcstombs(cAddress, (wchar_t*) address, size);
+        wcstombs(cAddress, (wchar_t*) address, size + 1);
         size = unlink(cAddress);
         free(cAddress);
         return size;
@@ -645,10 +719,14 @@ int _tmkfifo(TCHAR* arg, mode_t mode) {
     int r; 
 
     r = -1;
-    size = wcstombs(NULL, arg, 0) + 1;
-    cStr = malloc(size);
+    size = wcstombs(NULL, arg, 0);
+    if (size == (size_t)-1) {
+        return r;
+    }
+
+    cStr = malloc(size + 1);
     if (cStr) {
-        wcstombs(cStr, arg, size);
+        wcstombs(cStr, arg, size + 1);
         r = mkfifo(cStr, mode);
         free(cStr);
     }
@@ -661,10 +739,14 @@ int _tchdir(const TCHAR *path) {
     char *cStr;
 
     r = -1;
-    size = wcstombs(NULL, path, 0) + 1;
-    cStr = malloc(size);
+    size = wcstombs(NULL, path, 0);
+    if (size == (size_t)-1) {
+        return r;
+    }
+
+    cStr = malloc(size + 1);
     if (cStr) {
-        wcstombs(cStr, path, size);
+        wcstombs(cStr, path, size + 1);
         r = chdir(cStr);
         free(cStr);
     }
@@ -684,10 +766,19 @@ int _texecvp(TCHAR* arg, TCHAR **cmd) {
     cCmd = malloc((i + 1) * sizeof *cCmd);
     if (cCmd) {
         for (i = 0; i < size; i++) {
-            req  = wcstombs(NULL, cmd[i], 0) + 1;
-            cCmd[i] = malloc(req);
+            req  = wcstombs(NULL, cmd[i], 0);
+            if (req == (size_t)-1) {
+                i--;
+                for (; i > 0; i--) {
+                    free(cCmd[i]);
+                }
+                free(cCmd);
+                return -1;
+            }
+
+            cCmd[i] = malloc(req + 1);
             if (cCmd[i]) {
-                wcstombs(cCmd[i], cmd[i], req);
+                wcstombs(cCmd[i], cmd[i], req + 1);
             } else {
                 i--;
                 for (; i > 0; i--) {
@@ -698,10 +789,19 @@ int _texecvp(TCHAR* arg, TCHAR **cmd) {
             }
         }
         cCmd[size] = '\0';
-        req = wcstombs(NULL, arg, 0) + 1;
-        cArg = malloc(req);
+
+        req = wcstombs(NULL, arg, 0);
+        if (req == (size_t)-1) {
+            for (; size >= 0; size--) {
+                free(cCmd[size]);
+            }
+            free(cCmd);
+            return -1;
+        }
+
+        cArg = malloc(req + 1);
         if (cArg) {
-            wcstombs(cArg, arg, req);
+            wcstombs(cArg, arg, req + 1);
             i = execvp(cArg, cCmd);
             free(cArg);
         } else {
@@ -761,10 +861,19 @@ int _texecve(TCHAR* arg, TCHAR **cmd, TCHAR** env) {
     cCmd = malloc((i + 1) * sizeof *cCmd);
     if (cCmd) {
         for (i = 0; i < sizeCmd; i++) {
-            req  = wcstombs(NULL, cmd[i], 0) + 1;
-            cCmd[i] = malloc(req);
+            req  = wcstombs(NULL, cmd[i], 0);
+            if (req == (size_t)-1) {
+                i--;
+                for (; i > 0; i--) {
+                    free(cCmd[i]);
+                }
+                free(cCmd);
+                return -1;
+            }
+
+            cCmd[i] = malloc(req + 1);
             if (cCmd[i]) {
-                wcstombs(cCmd[i], cmd[i], req);
+                wcstombs(cCmd[i], cmd[i], req + 1);
             } else {
                 i--;
                 for (; i > 0; i--) {
@@ -788,10 +897,23 @@ int _texecve(TCHAR* arg, TCHAR **cmd, TCHAR** env) {
             return -1;
         }
         for (i = 0; i < sizeEnv; i++) {
-            req = wcstombs(NULL, env[i], 0) + 1;
-            cEnv[i] = malloc(req);
+            req = wcstombs(NULL, env[i], 0);
+            if (req == (size_t)-1) {
+                i--;
+                for (; i > 0; i--) {
+                    free(cEnv[i]);
+                }
+                free(cEnv);
+                for (; sizeCmd >= 0; sizeCmd--) {
+                    free(cCmd[sizeCmd]);
+                }
+                free(cCmd);
+                return -1;
+            }
+
+            cEnv[i] = malloc(req + 1);
             if (cEnv[i]) {
-                wcstombs(cEnv[i], env[i], req);
+                wcstombs(cEnv[i], env[i], req + 1);
             } else {
                 i--;
                 for (; i > 0; i--) {
@@ -806,10 +928,23 @@ int _texecve(TCHAR* arg, TCHAR **cmd, TCHAR** env) {
             }
         }
         cEnv[sizeEnv] = '\0';
-        req  = wcstombs(NULL, arg, 0) + 1;
-        cArg = malloc(req);
+
+        req  = wcstombs(NULL, arg, 0);
+        if (req == (size_t)-1) {
+            for (; sizeEnv >= 0; sizeEnv--) {
+                free(cEnv[sizeEnv]);
+            }
+            free(cEnv);
+            for (; sizeCmd >= 0; sizeCmd--) {
+                free(cCmd[sizeCmd]);
+            }
+            free(cCmd);
+            return -1;
+        }
+
+        cArg = malloc(req + 1);
         if (cArg) {
-            wcstombs(cArg, arg, req);
+            wcstombs(cArg, arg, req + 1);
             i = execve(cArg, cCmd, cEnv);
             free(cArg);
         } else {
@@ -833,10 +968,14 @@ int _topen(const TCHAR *path, int oflag, mode_t mode) {
     int r;
     size_t size;
 
-    size = wcstombs(NULL, path, 0) + 1;
-    cPath = malloc(size);
+    size = wcstombs(NULL, path, 0);
+    if (size == (size_t)-1) {
+        return -1;
+    }
+
+    cPath = malloc(size + 1);
     if (cPath) {
-        wcstombs(cPath, path, size);
+        wcstombs(cPath, path, size + 1);
         r = open(cPath, oflag, mode);
         free(cPath);
         return r;
@@ -853,10 +992,14 @@ int _tputenv(const TCHAR *string) {
     size_t size;
     char *cStr;
 
-    size = wcstombs(NULL, (wchar_t*)string, 0) + 1;
-    cStr = malloc(size);
+    size = wcstombs(NULL, (wchar_t*)string, 0);
+    if (size == (size_t)-1) {
+        return -1;
+    }
+
+    cStr = malloc(size + 1);
     if (cStr) {
-        wcstombs(cStr, string, size);
+        wcstombs(cStr, string, size + 1);
         r = putenv(cStr);
         /* Can't free cStr as it becomes part of the environment. */
         /*  free(cstr); */
@@ -871,21 +1014,30 @@ int _tsetenv(const TCHAR *name, const TCHAR *value, int overwrite) {
     char *cName;
     char *cValue;
 
-    size = wcstombs(NULL, (wchar_t*)name, 0) + 1;
-    cName = malloc(size);
+    size = wcstombs(NULL, (wchar_t*)name, 0);
+    if (size == (size_t)-1) {
+        return -1;
+    }
+
+    cName = malloc(size + 1);
     if (cName) {
-        wcstombs(cName, name, size);
-        
-        size = wcstombs(NULL, (wchar_t*)value, 0) + 1;
-        cValue = malloc(size);
+        wcstombs(cName, name, size + 1);
+
+        size = wcstombs(NULL, (wchar_t*)value, 0);
+        if (size == (size_t)-1) {
+            free(cName);
+            return -1;
+        }
+
+        cValue = malloc(size + 1);
         if (cValue) {
-            wcstombs(cValue, value, size);
-            
+            wcstombs(cValue, value, size + 1);
+
             r = setenv(cName, cValue, overwrite);
-            
+
             free(cValue);
         }
-        
+
         free(cName);
     }
     return r;
@@ -895,13 +1047,17 @@ void _tunsetenv(const TCHAR *name) {
     size_t size;
     char *cName;
 
-    size = wcstombs(NULL, (wchar_t*)name, 0) + 1;
-    cName = malloc(size);
+    size = wcstombs(NULL, (wchar_t*)name, 0);
+    if (size == (size_t)-1) {
+        return;
+    }
+
+    cName = malloc(size + 1);
     if (cName) {
-        wcstombs(cName, name, size);
-        
+        wcstombs(cName, name, size + 1);
+
         unsetenv(cName);
-        
+
         free(cName);
     }
 }
@@ -911,10 +1067,14 @@ int _tstat(const wchar_t* filename, struct stat *buf) {
     int size;
     char *cFileName;
 
-    size = wcstombs(NULL, (wchar_t*)filename, 0) + 1;
-    cFileName = malloc(size);
+    size = wcstombs(NULL, (wchar_t*)filename, 0);
+    if (size == (size_t)-1) {
+        return -1;
+    }
+
+    cFileName = malloc(size + 1);
     if (cFileName) {
-        wcstombs(cFileName, (wchar_t*) filename, size);
+        wcstombs(cFileName, (wchar_t*) filename, size + 1);
         size = stat(cFileName, buf);
         free(cFileName);
     }
@@ -922,12 +1082,13 @@ int _tstat(const wchar_t* filename, struct stat *buf) {
 }
 
 /**
- * @param file_name The file name to be resolved.
- * @param resolved_name A buffer large enough to hold MAX_PATH characters (plus a '\0')
+ * @param fileName The file name to be resolved.
+ * @param resolvedName A buffer large enough to hold the expanded path.
+ * @param resolvedNameSize The size of the resolvedName buffer, should usually be PATH_MAX + 1.
  *
- * @return resolved_name of success, otherwise NULL.
+ * @return resolvedName if successful, otherwise NULL.
  */
-wchar_t* _trealpath(const wchar_t* fileName, wchar_t *resolvedName) {
+wchar_t* _trealpathN(const wchar_t* fileName, wchar_t *resolvedName, size_t resolvedNameSize) {
     char *cFile;
 #if defined(IRIX)
     char resolved[FILENAME_MAX + 1];
@@ -935,37 +1096,364 @@ wchar_t* _trealpath(const wchar_t* fileName, wchar_t *resolvedName) {
     char resolved[PATH_MAX + 1];
 #endif
     int sizeFile;
-    int sizeReturn;
+    int req;
     char* returnVal;
-    
+
     /* Initialize the return value. */
     resolvedName[0] = TEXT('\0');
 
-    sizeFile = wcstombs(NULL, fileName, 0) + 1;
-    cFile = malloc(sizeFile);
+    sizeFile = wcstombs(NULL, fileName, 0);
+    if (sizeFile == (size_t)-1) {
+        return NULL;
+    }
+
+    cFile = malloc(sizeFile + 1);
     if (cFile) {
-        wcstombs(cFile, fileName, sizeFile);
+        wcstombs(cFile, fileName, sizeFile + 1);
+        
+        /* get the canonicalized absolute pathname */
         returnVal = realpath(cFile, resolved);
-        if (returnVal == NULL) {
-            free(cFile);
-            
-            /* The resolved var contains an error path.  Convert it. */
-            sizeReturn = mbstowcs(NULL, resolved, 0) + 1;
-            sizeReturn *= sizeof(TCHAR);
-            mbstowcs(resolvedName, resolved, sizeReturn);
-            
+
+        free(cFile);
+
+        /**
+         * In case realpath failed, resolved may contain a part of the path (until the folder that is invalid). So we convert it anyway. 
+         * For example cFile is "/home/user/alex/../nina" and in fact "/home/user/nina" doesn't exist.
+         * So realpath will fail and resolved will be "/home/user"
+         */
+        req = mbstowcs(NULL, resolved, MBSTOWCS_QUERY_LENGTH);
+        if (req == (size_t)-1) {
+            resolvedName[0] = TEXT('\0'); /* Terminate the output buffer as it does not contain a path. */
             return NULL;
         }
-        free(cFile);
+        mbstowcs(resolvedName, resolved, resolvedNameSize);
+        resolvedName[resolvedNameSize - 1] = TEXT('\0'); /* Avoid bufferflows caused by badly encoded characters. */
+
         
-        sizeReturn = mbstowcs(NULL, resolved, 0) + 1;
-        sizeReturn *= sizeof(TCHAR);
-        mbstowcs(resolvedName, resolved, sizeReturn);
-    
-        return resolvedName;
+        if (returnVal == NULL) {
+            return NULL;
+        } else {
+            return resolvedName;
+        }
     }
     return NULL;
 }
 #endif
 
+
+
+/**
+ * Function to get the system encoding name/number for the encoding
+ * of the conf file
+ *
+ * @para String holding the encoding from the conf file
+ *
+ * @return TRUE if not found, FALSE otherwise
+ *
+ */
+#ifdef WIN32
+int getEncodingByName(char* encodingMB, int *encoding) {
+#else
+int getEncodingByName(char* encodingMB, char** encoding) {
+#endif
+    if (strIgnoreCaseCmp(encodingMB, "Shift_JIS") == 0) {
+#if defined(FREEBSD) || defined (AIX) || defined(MACOSX)
+        *encoding = "SJIS";
+#elif defined(WIN32)
+        *encoding = 932;
+#else
+        *encoding = "shiftjis";
+#endif
+    } else if (strIgnoreCaseCmp(encodingMB, "eucJP") == 0) {
+#if defined(AIX)
+        *encoding = "IBM-eucJP";
+#elif defined(WIN32)
+        *encoding = 20932;
+#else
+        *encoding = "eucJP";
+#endif
+    } else if (strIgnoreCaseCmp(encodingMB, "UTF-8") == 0) {
+#if defined(HPUX)
+        *encoding = "utf8";
+#elif defined(WIN32)
+        *encoding = 65001;
+#else
+        *encoding = "UTF-8";
+#endif
+    } else if (strIgnoreCaseCmp(encodingMB, "ISO-8859-1") == 0) {
+#if defined(WIN32)
+        *encoding = 28591;
+#elif defined(LINUX)
+        *encoding = "ISO-8859-1";
+#else
+        *encoding = "ISO8859-1";
+#endif
+    } else if (strIgnoreCaseCmp(encodingMB, "CP1252") == 0) {
+#if defined(WIN32)
+        *encoding = 1252;
+#else
+        *encoding = "CP1252";
+#endif
+    } else if (strIgnoreCaseCmp(encodingMB, "ISO-8859-2") == 0) {
+#if defined(WIN32)
+        *encoding = 28592;
+#elif defined(LINUX)
+        *encoding = "ISO-8859-2";
+#else
+        *encoding = "ISO8859-2";
+#endif
+    } else if (strIgnoreCaseCmp(encodingMB, "ISO-8859-3") == 0) {
+#if defined(WIN32)
+        *encoding = 28593;
+#elif defined(LINUX)
+        *encoding = "ISO-8859-3";
+#else
+        *encoding = "ISO8859-3";
+#endif
+    } else if (strIgnoreCaseCmp(encodingMB, "ISO-8859-4") == 0) {
+#if defined(WIN32)
+        *encoding = 28594;
+#elif defined(LINUX)
+        *encoding = "ISO-8859-4";
+#else
+        *encoding = "ISO8859-4";
+#endif
+    } else if (strIgnoreCaseCmp(encodingMB, "ISO-8859-5") == 0) {
+#if defined(WIN32)
+        *encoding = 28595;
+#elif defined(LINUX)
+        *encoding = "ISO-8859-5";
+#else
+        *encoding = "ISO8859-5";
+#endif
+    } else if (strIgnoreCaseCmp(encodingMB, "ISO-8859-6") == 0) {
+#if defined(WIN32)
+        *encoding = 28596;
+#elif defined(LINUX)
+        *encoding = "ISO-8859-6";
+#else
+        *encoding = "ISO8859-6";
+#endif
+    } else if (strIgnoreCaseCmp(encodingMB, "ISO-8859-7") == 0) {
+#if defined(WIN32)
+        *encoding = 28597;
+#elif defined(LINUX)
+        *encoding = "ISO-8859-7";
+#else
+        *encoding = "ISO8859-7";
+#endif
+    } else if (strIgnoreCaseCmp(encodingMB, "ISO-8859-8") == 0) {
+#if defined(WIN32)
+        *encoding = 28598;
+#elif defined(LINUX)
+        *encoding = "ISO-8859-8";
+#else
+        *encoding = "ISO8859-8";
+#endif
+    } else if (strIgnoreCaseCmp(encodingMB, "ISO-8859-9") == 0) {
+#if defined(WIN32)
+        *encoding = 28599;
+#elif defined(LINUX)
+        *encoding = "ISO-8859-9";
+#else
+        *encoding = "ISO8859-9";
+#endif
+    } else if (strIgnoreCaseCmp(encodingMB, "ISO-8859-10") == 0) {
+#if defined(WIN32)
+        *encoding = 28600;
+#elif defined(LINUX)
+        *encoding = "ISO-8859-10";
+#else
+        *encoding = "ISO8859-10";
+#endif
+    } else if (strIgnoreCaseCmp(encodingMB, "ISO-8859-11") == 0) {
+#if defined(WIN32)
+        *encoding = 28601;
+#elif defined(LINUX)
+        *encoding = "ISO-8859-11";
+#else
+        *encoding = "ISO8859-11";
+#endif
+    } else if (strIgnoreCaseCmp(encodingMB, "ISO-8859-13") == 0) {
+#if defined(WIN32)
+        *encoding = 28603;
+#elif defined(LINUX)
+        *encoding = "ISO-8859-13";
+#else
+        *encoding = "ISO8859-13";
+#endif
+    } else if (strIgnoreCaseCmp(encodingMB, "ISO-8859-14") == 0) {
+#if defined(WIN32)
+        *encoding = 28604;
+#elif defined(LINUX)
+        *encoding = "ISO-8859-14";
+#else
+        *encoding = "ISO8859-14";
+#endif
+    } else if (strIgnoreCaseCmp(encodingMB, "ISO-8859-15") == 0) {
+#if defined(WIN32)
+        *encoding = 28605;
+#elif defined(LINUX)
+        *encoding = "ISO-8859-15";
+#else
+        *encoding = "ISO8859-15";
+#endif
+    } else if (strIgnoreCaseCmp(encodingMB, "ISO-8859-16") == 0) {
+#if defined(WIN32)
+        *encoding = 28606;
+#elif defined(LINUX)
+        *encoding = "ISO-8859-16";
+#else
+        *encoding = "ISO8859-16";
+#endif
+    } else if (strIgnoreCaseCmp(encodingMB, "CP1250") == 0) {
+#if defined(WIN32)
+        *encoding = 1250;
+#else
+        *encoding = "CP1250";
+#endif
+    } else if (strIgnoreCaseCmp(encodingMB, "CP1251") == 0) {
+#if defined(WIN32)
+        *encoding = 1251;
+#else
+        *encoding = "CP1251";
+#endif
+    } else if (strIgnoreCaseCmp(encodingMB, "KOI8-R") == 0) {
+#if defined(WIN32)
+        *encoding = 20866;
+#else
+        *encoding = "KOI8-R";
+#endif
+    } else if (strIgnoreCaseCmp(encodingMB, "KOI8-U") == 0) {
+#if defined(WIN32)
+        *encoding = 21866;
+#else
+        *encoding = "KOI8-U";
+#endif
+    } else if (strIgnoreCaseCmp(encodingMB, "DEFAULT") == 0) {
+#ifdef WIN32
+            *encoding = GetACP();
+#else 
+            *encoding = nl_langinfo(CODESET);
+ #ifdef MACOSX
+            if (strlen(*encoding) == 0) {
+                *encoding = "UTF-8";
+            }
+ #endif
+#endif
+    } else {
+        return TRUE;
+    }
+    return FALSE;
+}
+
+/**
+ * Gets the error code for the last operation that failed.
+ */
+int wrapperGetLastError() {
+#ifdef WIN32
+    return WSAGetLastError();
+#else
+    return errno;
+#endif
+}
+
+/*
+ * Corrects a path in place by replacing all '/' characters with '\'
+ *  on Windows platforms.  Does nothing on NIX platforms.
+ *
+ * filename - Filename to be modified.  Could be null.
+ */
+void wrapperCorrectWindowsPath(TCHAR *filename) {
+#ifdef WIN32
+    TCHAR *c;
+
+    if (filename) {
+        c = (TCHAR *)filename;
+        while((c = _tcschr(c, TEXT('/'))) != NULL) {
+            c[0] = TEXT('\\');
+        }
+    }
+#endif
+}
+
+#ifdef FREEBSD
+/*
+ * Tries to load libiconv and then fallback in FreeBSD.
+ * Unfortunately we can not do any pretty logging here as iconv is
+ *  required for all of that to work.
+ *
+ * @return TRUE if there were any problems, FALSE otherwise.
+ */
+int loadIconvLibrary() {
+    void *libHandle;
+    const char *error;
+    
+    /* iconv library name present from FreeBSD 7 to 9 */
+    libHandle = dlopen("/usr/local/lib/libiconv.so", RTLD_NOW);
+
+    /* Falling back to libbiconv library in FreeBSD 10 */
+    if (libHandle == NULL) {
+        libHandle = dlopen("/usr/local/lib/libbiconv.so", RTLD_NOW);
+    }
+
+    /* Falling back to libkiconv.4 in FreeBSD 10 */
+    if (libHandle == NULL) {
+        libHandle = dlopen("/lib/libkiconv.so.4", RTLD_NOW);
+    }
+
+    /* No library found, we cannot continue as we need iconv support */
+    if (!libHandle) {
+        /* The string that dlerror is in a static buffer and should not be freed. It must be immediately used or copied. */
+        error = dlerror();
+        printf("Failed to locate the iconv library: %s\n", (error ? error : "<null>"));
+        printf("Unable to continue.\n");
+        return TRUE;
+    }
+    
+    /* Look up the required functions. */
+    *(void **)(&wrapper_iconv_open) = dlsym(libHandle, "iconv_open");
+    if (!wrapper_iconv_open) {
+        /* The string that dlerror is in a static buffer and should not be freed. It must be immediately used or copied. */
+        error = dlerror();
+        printf("Failed to locate the %s function from the iconv library: %s\n", "iconv_open", (error ? error : "<null>"));
+        printf("Unable to continue.\n");
+        return TRUE;
+    }
+    *(void **)(&wrapper_iconv) = dlsym(libHandle, "iconv");
+    if (!wrapper_iconv) {
+        /* The string that dlerror is in a static buffer and should not be freed. It must be immediately used or copied. */
+        error = dlerror();
+        printf("Failed to locate the %s function from the iconv library: %s\n", "iconv", (error ? error : "<null>"));
+        printf("Unable to continue.\n");
+        return TRUE;
+    }
+    *(void **)(&wrapper_iconv_close) = dlsym(libHandle,"iconv_close");
+    if (!wrapper_iconv_close) {
+        /* The string that dlerror is in a static buffer and should not be freed. It must be immediately used or copied. */
+        error = dlerror();
+        printf("Failed to locate the %s function from the iconv library: %s\n", "iconv_close", (error ? error : "<null>"));
+        printf("Unable to continue.\n");
+        return TRUE;
+    }
+
+    return FALSE;
+}
+#endif
+
+#ifdef DEBUG_MALLOC
+ /* There can't be any more malloc calls after the malloc2 function in this file. */
+ #undef malloc
+void *malloc2(size_t size, const char *file, int line, const char *func, const char *sizeVar) {
+    void *ptr;
+ #ifdef WIN32
+    wprintf(L"%S:%d:%S malloc(%S) -> malloc(%d)", file, line, func, sizeVar, size);
+ #else	
+    wprintf(L"%s:%d:%s malloc(%s) -> malloc(%d)", file, line, func, sizeVar, size);
+ #endif
+    ptr = malloc(size);
+    wprintf(L" -> %p\n", ptr);
+    return ptr;
+}
+#endif
 

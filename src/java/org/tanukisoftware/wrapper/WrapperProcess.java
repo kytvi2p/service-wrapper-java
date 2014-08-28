@@ -1,7 +1,7 @@
 package org.tanukisoftware.wrapper;
 
 /*
- * Copyright (c) 1999, 2013 Tanuki Software, Ltd.
+ * Copyright (c) 1999, 2014 Tanuki Software, Ltd.
  * http://www.tanukisoftware.com
  * All rights reserved.
  *
@@ -161,14 +161,12 @@ public class WrapperProcess
     public int waitFor()
         throws InterruptedException
     {
-        synchronized( this )
+        if ( m_exitcode == Integer.MIN_VALUE )
         {
-            if ( m_exitcode == Integer.MIN_VALUE )
-            {
-                nativeWaitFor();
-            }
-            return m_exitcode;
+            nativeWaitFor();
         }
+        
+        return m_exitcode;
     }
 
     /**

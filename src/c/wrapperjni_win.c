@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999, 2013 Tanuki Software, Ltd.
+ * Copyright (c) 1999, 2014 Tanuki Software, Ltd.
  * http://www.tanukisoftware.com
  * All rights reserved.
  *
@@ -42,7 +42,7 @@ barf
 #include <tlhelp32.h>
 #include <winnt.h>
 #include <Sddl.h>
-#include "wrapper_i18n.h"
+#include "loggerjni.h"
 #include "wrapperjni.h"
 
 /* MS Visual Studio 8 went and deprecated the POXIX names for functions.
@@ -545,9 +545,8 @@ jobject createWrapperUserForProcess(JNIEnv *env, DWORD processId, jboolean group
     return wrapperUser;
 }
 
+HMODULE kernel32Mod;
 void loadDLLProcs() {
-    HMODULE kernel32Mod;
-
     if ((kernel32Mod = GetModuleHandle(TEXT("KERNEL32.DLL"))) == NULL) {
         _tprintf(TEXT("WrapperJNI Error: Unable to load KERNEL32.DLL: %s\n"), getLastErrorText());
         flushall();
@@ -638,7 +637,10 @@ Java_org_tanukisoftware_wrapper_WrapperManager_nativeInit(JNIEnv *env, jclass jC
             flushall();
         }
     }
-    initCommon(env, jClassWrapperManager);
+    if (initCommon(env, jClassWrapperManager)) {
+        /* Failed.  An exception will have been thrown. */
+        return;
+    }
 
     osVer.dwOSVersionInfoSize = sizeof(osVer);
     if (GetVersionEx(&osVer)) {
