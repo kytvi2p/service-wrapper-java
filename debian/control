@@ -11,7 +11,8 @@ Build-Depends: debhelper (>= 9),
  ant-optional,
  junit,
  junit4,
- hardening-wrapper
+ libcunit1-ncurses-dev,
+ libncurses5-dev
 Standards-Version: 3.9.5
 Vcs-Git: git://git.debian.org/git/pkg-java/service-wrapper-java.git
 Vcs-Browser: http://git.debian.org/?p=pkg-java/service-wrapper-java.git
@@ -48,7 +49,7 @@ Description:Jar daemon wrapper java libraries
 Package: libservice-wrapper-jni
 Architecture: amd64 armel armhf i386 ia64 kfreebsd-amd64 kfreebsd-i386 powerpc mips mipsel
 Depends: ${shlibs:Depends}, ${misc:Depends},
- default-jre-headless | java5-runtime-headless | java6-runtime-headless
+ default-jre-headless | java5-runtime-headless | java6-runtime-headless | java7-runtime-headless
 Suggests: libservice-wrapper-doc
 Description:Jar daemon wrapper JNI libraries
  This Package contains the JNI libraries used by the Java Service Wrapper.

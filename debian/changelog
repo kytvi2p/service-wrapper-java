@@ -1,3 +1,21 @@
+service-wrapper-java (3.5.25-1) UNRELEASED; urgency=medium
+
+  * New upstream release
+  * debian/control
+    - add java7-runtime-headless as an alternate to satisfy the java
+      dependencies
+    - drop build dependency on hardening-wrapper as this package is now
+      obsolete.
+    - build depend on  libcunit1-ncurses-dev, libncurses5-dev
+  * hardening
+    - Add ldflags.patch to insert a LDFLAGS variable into the upstream
+      makefiles so that hardening LDFLAGS can be used in the build. As noted
+      above, hardening-wrapper is no longer used as it's obsolete.
+    - Update additional-makefiles.patch and kfreebsd-support.patch to add the
+      LDFLAGS variable
+
+ -- Kill Your TV <killyourtv@i2pmail.org>  Thu, 28 Aug 2014 13:24:16 +0000
+
 service-wrapper-java (3.5.22-3) unstable; urgency=low
 
   * Correct bug number typo in previous upload.

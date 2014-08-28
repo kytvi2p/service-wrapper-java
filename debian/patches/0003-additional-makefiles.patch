@@ -19,9 +19,9 @@ Description: linux makefiles for other architectures
 +
 +DEFS = -I$(INCLUDE) -I$(INCLUDE)/linux
 +
-+wrapper_SOURCE = wrapper.c wrapperinfo.c wrappereventloop.c wrapper_unix.c property.c logger.c wrapper_file.c wrapper_i18n.c test.c wrapper_hashmap.c
++wrapper_SOURCE = wrapper.c wrapperinfo.c wrappereventloop.c wrapper_unix.c property.c logger.c wrapper_file.c wrapper_i18n.c wrapper_hashmap.c
 +
-+libwrapper_so_OBJECTS = wrapper_i18n.o wrapperjni_unix.o wrapperinfo.o wrapperjni.o
++libwrapper_so_OBJECTS = wrapper_i18n.o wrapperjni_unix.o wrapperinfo.o wrapperjni.o loggerjni.o
 +
 +BIN = ../../bin
 +LIB = ../../lib
@@ -39,10 +39,10 @@ Description: linux makefiles for other architectures
 +	if test ! -d .deps; then mkdir .deps; fi
 +
 +wrapper: $(wrapper_SOURCE)
-+	$(COMPILE) -pthread $(wrapper_SOURCE) -lm -o $(BIN)/wrapper
++	$(COMPILE) -pthread $(wrapper_SOURCE) -lm $(LDFLAGS) -o $(BIN)/wrapper
 +
 +libwrapper.so: $(libwrapper_so_OBJECTS)
-+	${COMPILE} -shared $(libwrapper_so_OBJECTS) -o $(LIB)/libwrapper.so
++	${COMPILE} -shared $(libwrapper_so_OBJECTS) $(LDFLAGS) -o $(LIB)/libwrapper.so
 +
 +%.o: %.c
 +	@echo '$(COMPILE) -c $<'; \
@@ -71,9 +71,9 @@ Description: linux makefiles for other architectures
 +
 +DEFS = -I$(INCLUDE) -I$(INCLUDE)/linux
 +
-+wrapper_SOURCE = wrapper.c wrapperinfo.c wrappereventloop.c wrapper_unix.c property.c logger.c wrapper_file.c wrapper_i18n.c test.c wrapper_hashmap.c
++wrapper_SOURCE = wrapper.c wrapperinfo.c wrappereventloop.c wrapper_unix.c property.c logger.c wrapper_file.c wrapper_i18n.c wrapper_hashmap.c
 +
-+libwrapper_so_OBJECTS = wrapper_i18n.o wrapperjni_unix.o wrapperinfo.o wrapperjni.o
++libwrapper_so_OBJECTS = wrapper_i18n.o wrapperjni_unix.o wrapperinfo.o wrapperjni.o loggerjni.o
 +
 +BIN = ../../bin
 +LIB = ../../lib
@@ -91,10 +91,10 @@ Description: linux makefiles for other architectures
 +	if test ! -d .deps; then mkdir .deps; fi
 +
 +wrapper: $(wrapper_SOURCE)
-+	$(COMPILE) -pthread $(wrapper_SOURCE) -lm -o $(BIN)/wrapper
++	$(COMPILE) -pthread $(wrapper_SOURCE) -lm $(LDFLAGS) -o $(BIN)/wrapper
 +
 +libwrapper.so: $(libwrapper_so_OBJECTS)
-+	${COMPILE} -shared $(libwrapper_so_OBJECTS) -o $(LIB)/libwrapper.so
++	${COMPILE} -shared $(libwrapper_so_OBJECTS) $(LDFLAGS) -o $(LIB)/libwrapper.so
 +
 +%.o: %.c
 +	@echo '$(COMPILE) -c $<'; \
@@ -125,7 +125,7 @@ Description: linux makefiles for other architectures
 +
 +wrapper_SOURCE = wrapper.c wrapperinfo.c wrappereventloop.c wrapper_unix.c property.c logger.c wrapper_file.c wrapper_i18n.c wrapper_hashmap.c
 +
-+libwrapper_so_OBJECTS = wrapper_i18n.o wrapperjni_unix.o wrapperinfo.o wrapperjni.o
++libwrapper_so_OBJECTS = wrapper_i18n.o wrapperjni_unix.o wrapperinfo.o wrapperjni.o loggerjni.o
 +
 +BIN = ../../bin
 +LIB = ../../lib
@@ -143,10 +143,10 @@ Description: linux makefiles for other architectures
 +	if test ! -d .deps; then mkdir .deps; fi
 +
 +wrapper: $(wrapper_SOURCE)
-+	$(COMPILE) -lm -pthread $(wrapper_SOURCE) -o $(BIN)/wrapper
++	$(COMPILE) -lm -pthread $(wrapper_SOURCE) $(LDFLAGS) -o $(BIN)/wrapper
 +
 +libwrapper.so: $(libwrapper_so_OBJECTS)
-+	${COMPILE} -shared $(libwrapper_so_OBJECTS) -o $(LIB)/libwrapper.so
++	${COMPILE} -shared $(libwrapper_so_OBJECTS) $(LDFLAGS) -o $(LIB)/libwrapper.so
 +
 +%.o: %.c
 +	@echo '$(COMPILE) -c $<'; \
@@ -177,7 +177,7 @@ Description: linux makefiles for other architectures
 +
 +wrapper_SOURCE = wrapper.c wrapperinfo.c wrappereventloop.c wrapper_unix.c property.c logger.c wrapper_file.c wrapper_i18n.c wrapper_hashmap.c
 +
-+libwrapper_so_OBJECTS = wrapper_i18n.o wrapperjni_unix.o wrapperinfo.o wrapperjni.o
++libwrapper_so_OBJECTS = wrapper_i18n.o wrapperjni_unix.o wrapperinfo.o wrapperjni.o loggerjni.o
 +
 +BIN = ../../bin
 +LIB = ../../lib
@@ -195,10 +195,10 @@ Description: linux makefiles for other architectures
 +	if test ! -d .deps; then mkdir .deps; fi
 +
 +wrapper: $(wrapper_SOURCE)
-+	$(COMPILE) -lm -pthread $(wrapper_SOURCE) -o $(BIN)/wrapper
++	$(COMPILE) -lm -pthread $(LDFLAGS) $(wrapper_SOURCE) -o $(BIN)/wrapper
 +
 +libwrapper.so: $(libwrapper_so_OBJECTS)
-+	${COMPILE} -shared $(libwrapper_so_OBJECTS) -o $(LIB)/libwrapper.so
++	${COMPILE} -shared $(LDFLAGS) $(libwrapper_so_OBJECTS) -o $(LIB)/libwrapper.so
 +
 +%.o: %.c
 +	@echo '$(COMPILE) -c $<'; \
@@ -229,7 +229,7 @@ Description: linux makefiles for other architectures
 +
 +wrapper_SOURCE = wrapper.c wrapperinfo.c wrappereventloop.c wrapper_unix.c property.c logger.c wrapper_file.c wrapper_i18n.c wrapper_hashmap.c
 +
-+libwrapper_so_OBJECTS = wrapper_i18n.o wrapperjni_unix.o wrapperinfo.o wrapperjni.o
++libwrapper_so_OBJECTS = wrapper_i18n.o wrapperjni_unix.o wrapperinfo.o wrapperjni.o loggerjni.o
 +
 +BIN = ../../bin
 +LIB = ../../lib
@@ -247,10 +247,10 @@ Description: linux makefiles for other architectures
 +	if test ! -d .deps; then mkdir .deps; fi
 +
 +wrapper: $(wrapper_SOURCE)
-+	$(COMPILE) -lm -pthread $(wrapper_SOURCE) -o $(BIN)/wrapper
++	$(COMPILE) -lm -pthread $(LDFLAGS) $(wrapper_SOURCE) -o $(BIN)/wrapper
 +
 +libwrapper.so: $(libwrapper_so_OBJECTS)
-+	${COMPILE} -shared $(libwrapper_so_OBJECTS) -o $(LIB)/libwrapper.so
++	${COMPILE} -shared $(LDFLAGS) $(libwrapper_so_OBJECTS) -o $(LIB)/libwrapper.so
 +
 +%.o: %.c
 +	@echo '$(COMPILE) -c $<'; \

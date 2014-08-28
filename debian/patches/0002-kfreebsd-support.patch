@@ -6,12 +6,14 @@ Subject: kfreebsd support
  build.xml                           |  5 ++++-
  src/c/Makefile-kfreebsd-x86-32.make | 42 +++++++++++++++++++++++++++++++++++++
  src/c/Makefile-kfreebsd-x86-64.make | 42 +++++++++++++++++++++++++++++++++++++
- src/c/logger.c                      |  2 +-
+ src/c/logger.c                      |  3 ++-
  src/c/wrapper.c                     |  6 ++++--
- 5 files changed, 93 insertions(+), 4 deletions(-)
+ 5 files changed, 94 insertions(+), 4 deletions(-)
  create mode 100644 src/c/Makefile-kfreebsd-x86-32.make
  create mode 100644 src/c/Makefile-kfreebsd-x86-64.make
 
+diff --git a/build.xml b/build.xml
+index fa2c6d5..5206ccf 100644
 --- a/build.xml
 +++ b/build.xml
 @@ -87,6 +87,9 @@
@@ -33,6 +35,9 @@ Subject: kfreebsd support
              <not>
                  <equals arg1="${sun.arch.data.model}" arg2="${bits}"/>
              </not>
+diff --git a/src/c/Makefile-kfreebsd-x86-32.make b/src/c/Makefile-kfreebsd-x86-32.make
+new file mode 100644
+index 0000000..a70e660
 --- /dev/null
 +++ b/src/c/Makefile-kfreebsd-x86-32.make
 @@ -0,0 +1,42 @@
@@ -53,7 +58,7 @@ Subject: kfreebsd support
 +
 +wrapper_SOURCE = wrapper.c wrapperinfo.c wrappereventloop.c wrapper_unix.c property.c logger.c wrapper_file.c wrapper_i18n.c wrapper_hashmap.c
 +
-+libwrapper_so_OBJECTS = wrapper_i18n.o wrapperjni_unix.o wrapperinfo.o wrapperjni.o
++libwrapper_so_OBJECTS = wrapper_i18n.o wrapperjni_unix.o wrapperinfo.o wrapperjni.o loggerjni.o
 +
 +BIN = ../../bin
 +LIB = ../../lib
@@ -71,13 +76,16 @@ Subject: kfreebsd support
 +	if test ! -d .deps; then mkdir .deps; fi
 +
 +wrapper: $(wrapper_SOURCE)
-+	$(CC) $(wrapper_SOURCE) -lm -pthread -o $(BIN)/wrapper
++	$(CC) $(wrapper_SOURCE) -lm -pthread $(LDFLAGS)-o $(BIN)/wrapper
 +
 +libwrapper.so: $(libwrapper_so_OBJECTS)
-+	$(CC) -shared $(libwrapper_so_OBJECTS) -o $(LIB)/libwrapper.so
++	$(CC) -shared $(libwrapper_so_OBJECTS) $(LDFLAGS) -o $(LIB)/libwrapper.so
 +
 +#%.o: %.c
 +#	$(COMPILE) -c $(DEFS) $<
+diff --git a/src/c/Makefile-kfreebsd-x86-64.make b/src/c/Makefile-kfreebsd-x86-64.make
+new file mode 100644
+index 0000000..a2822f5
 --- /dev/null
 +++ b/src/c/Makefile-kfreebsd-x86-64.make
 @@ -0,0 +1,42 @@
@@ -98,7 +106,7 @@ Subject: kfreebsd support
 +
 +wrapper_SOURCE = wrapper.c wrapperinfo.c wrappereventloop.c wrapper_unix.c property.c logger.c wrapper_file.c wrapper_i18n.c wrapper_hashmap.c
 +
-+libwrapper_so_OBJECTS = wrapper_i18n.o wrapperjni_unix.o wrapperinfo.o wrapperjni.o
++libwrapper_so_OBJECTS = wrapper_i18n.o wrapperjni_unix.o wrapperinfo.o wrapperjni.o loggerjni.o
 +
 +BIN = ../../bin
 +LIB = ../../lib
@@ -116,27 +124,32 @@ Subject: kfreebsd support
 +	if test ! -d .deps; then mkdir .deps; fi
 +
 +wrapper: $(wrapper_SOURCE)
-+	$(CC) $(wrapper_SOURCE) -lm -pthread -o $(BIN)/wrapper
++	$(CC) $(wrapper_SOURCE) -lm -pthread $(LDFLAGS) -o $(BIN)/wrapper
 +
 +libwrapper.so: $(libwrapper_so_OBJECTS)
-+	$(CC) -shared $(libwrapper_so_OBJECTS) -o $(LIB)/libwrapper.so
++	$(CC) -shared $(libwrapper_so_OBJECTS) $(LDFLAGS) -o $(LIB)/libwrapper.so
 +
 +#%.o: %.c
 +#	$(COMPILE) -c $(DEFS) $<
+diff --git a/src/c/logger.c b/src/c/logger.c
+index 15e5bc8..3c873bc 100644
 --- a/src/c/logger.c
 +++ b/src/c/logger.c
-@@ -76,7 +76,7 @@
+@@ -74,7 +74,8 @@ typedef long intptr_t;
+   #include <sys/fcntl.h>
   #elif defined(AIX) || defined(HPUX) || defined(MACOSX) || defined(OSF1)
   #elif defined(IRIX)
-   #define PATH_MAX FILENAME_MAX
 - #elif defined(FREEBSD)
++  #define PATH_MAX FILENAME_MAX
 + #elif defined(FREEBSD) || defined(KFREEBSD)
    #include <sys/param.h>
    #include <errno.h>
   #else /* LINUX */
+diff --git a/src/c/wrapper.c b/src/c/wrapper.c
+index deed088..4807571 100644
 --- a/src/c/wrapper.c
 +++ b/src/c/wrapper.c
-@@ -98,7 +98,7 @@
+@@ -93,7 +93,7 @@
   #elif defined(AIX) || defined(HPUX) || defined(MACOSX) || defined(OSF1)
   #elif defined(IRIX)
    #define PATH_MAX FILENAME_MAX
@@ -145,7 +158,7 @@ Subject: kfreebsd support
    #include <sys/param.h>
    #include <errno.h>
   #else /* LINUX */
-@@ -4619,7 +4619,7 @@
+@@ -4701,7 +4701,7 @@ int checkIfBinary(const TCHAR *filename) {
              log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_DEBUG, TEXT("Magic number for file %s: 0x%02x%02x%02x%02x"), filename, head[0], head[1], head[2], head[3]);
          }
  
@@ -154,7 +167,7 @@ Subject: kfreebsd support
          if (head[1] == 'E' && head[2] == 'L' && head[3] == 'F') {
              return 1; /*ELF */
  #elif defined(AIX)
-@@ -5913,6 +5913,8 @@
+@@ -6022,6 +6022,8 @@ int wrapperBuildJavaCommandArrayInner(TCHAR **strings, int addQuotes, const TCHA
                                TEXT("wrapper.java.additional.auto_bits.solaris"),
  #elif defined(FREEBSD)
                                TEXT("wrapper.java.additional.auto_bits.freebsd"),
