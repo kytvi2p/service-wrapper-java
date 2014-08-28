@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999, 2013 Tanuki Software, Ltd.
+ * Copyright (c) 1999, 2014 Tanuki Software, Ltd.
  * http://www.tanukisoftware.com
  * All rights reserved.
  *
@@ -254,8 +254,10 @@ struct WrapperConfig {
     int     commandLogLevel;        /* The log level to use when logging the java command. */
     int     printJVMVersion;        /* tells the Wrapper to create a temp JVM to query the version, before starting the java application */
 #ifdef WIN32
+    TCHAR   *jvmVersionCommand;     /* Command used to launch the JVM and request its version */
     TCHAR   *jvmCommand;            /* Command used to launch the JVM */
 #else /* UNIX */
+    TCHAR   **jvmVersionCommand;    /* Command used to launch the JVM and request its version */
     TCHAR   **jvmCommand;           /* Command used to launch the JVM */
 #endif
     int     detachStarted;          /* TRUE if the JVM process should be detached once it has started. */
@@ -277,7 +279,7 @@ struct WrapperConfig {
     int     shutdownTimeout;        /* Number of seconds the wrapper will wait for a JVM to shutdown */
     int     jvmExitTimeout;         /* Number of seconds the wrapper will wait for a JVM to process to terminate */
     int     jvmCleanupTimeout;      /* Number of seconds the wrapper will allow for its post JVM shudown cleanup. */
-    int     jvmTerminateTimeout;      /* Number of seconds the wrapper will allow for the JVM to respond to TerminateProcess request. */
+    int     jvmTerminateTimeout;    /* Number of seconds the wrapper will allow for the JVM to respond to TerminateProcess request. */
 #ifdef WIN32
     int     javaIOBufferSize;       /* Size of the pipe buffer to use for java I/O. */
 #endif
@@ -754,11 +756,6 @@ extern TCHAR* findPathOf(const TCHAR *exe, const TCHAR* name);
 #endif
 
 /**
- * Gets the error code for the last operation that failed.
- */
-extern int wrapperGetLastError();
-
-/**
  * Execute initialization code to get the wrapper set up.
  */
 extern int wrapperInitializeRun();
@@ -1058,6 +1055,6 @@ struct LoadParameterFileCallbackParam {
 };
 
 #ifdef CUNIT
-extern void testJavaAdditionalParamSuite(void);
+extern void tsJAP_testJavaAdditionalParamSuite(void);
 #endif /* CUNIT */
 #endif

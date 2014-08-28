@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999, 2013 Tanuki Software, Ltd.
+ * Copyright (c) 1999, 2014 Tanuki Software, Ltd.
  * http://www.tanukisoftware.com
  * All rights reserved.
  *
@@ -97,6 +97,29 @@ struct Properties {
  * Return TRUE if there were any problems, FALSE otherwise.
  */
 extern int setEnv(const TCHAR *name, const TCHAR *value, int source);
+
+/**
+ * Parses a property value and populates any environment variables.  If the expanded
+ *  environment variable would result in a string that is longer than bufferLength
+ *  the value is truncated.
+ *
+ * @param warnUndefinedVars Log warnings about missing environment variables.
+ * @param warnedUndefVarMap Map of variables which have previously been logged, may be NULL if warnUndefinedVars false.
+ * @param warnLogLevel Log level at which any warnings will be logged.
+ */
+extern void evaluateEnvironmentVariables(const TCHAR *propertyValue, TCHAR *buffer, int bufferLength, int warnUndefinedVars, PHashMap warnedUndefVarMap, int warnLogLevel);
+
+/**
+ * This function returns a reference to a static buffer and is NOT thread safe.
+ *  Check implementation notes before using.
+ */
+extern TCHAR* generateTimeValue(const TCHAR* format, struct tm *timeTM);
+
+/**
+ * This function returns a reference to a static buffer and is NOT thread safe.
+ *  Check implementation notes before using.
+ */
+extern TCHAR* generateRandValue(const TCHAR* format);
 
 /**
  * Create a Properties structure loaded in from the specified file.

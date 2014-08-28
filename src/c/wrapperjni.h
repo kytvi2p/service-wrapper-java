@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999, 2013 Tanuki Software, Ltd.
+ * Copyright (c) 1999, 2014 Tanuki Software, Ltd.
  * http://www.tanukisoftware.com
  * All rights reserved.
  *
@@ -64,7 +64,6 @@ extern int redirectedStdOut;
 /** Flag to keep track of whether StdErr has been redirected. */
 extern int redirectedStdErr;
 
-extern TCHAR* getLastErrorText();
 extern void throwJNIError(JNIEnv *env, const TCHAR *message);
 
 /* Special symbols that need to be defined manually as part of the bootstrap process. */
@@ -82,6 +81,7 @@ extern char *utf8MethodGetProperties;
 extern char *utf8SigVrLjavaUtilProperties;
 extern char *utf8MethodGetProperty;
 extern char *utf8SigLjavaLangStringrLjavaLangString;
+extern char *utf8javaIOIOException; /* "java/io/IOException" */
 
 #ifdef WIN32
 #else
@@ -98,9 +98,8 @@ extern char *utf8SigIStringrV;
 extern jstring JNU_NewStringFromNativeChar(JNIEnv *env, const char *str);
 #endif
 
-extern void initCommon();
+extern int initCommon();
 
-extern int getLastError();
 extern void throwOutOfMemoryError(JNIEnv *env, const TCHAR* locationCode);
 
 extern int wrapperSleep(int ms);

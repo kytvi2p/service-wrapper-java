@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999, 2013 Tanuki Software, Ltd.
+ * Copyright (c) 1999, 2014 Tanuki Software, Ltd.
  * http://www.tanukisoftware.com
  * All rights reserved.
  *
@@ -52,9 +52,9 @@
 #include <unistd.h>
 #include <stdlib.h>
 #endif
-#include "wrapper_i18n.h"
 #include "wrapper.h"
 #include "logger.h"
+#include "wrapper_i18n.h"
 
 #ifndef MAX
 #define MAX(a, b)  (((a) > (b)) ? (a) : (b))
@@ -1277,8 +1277,17 @@ void jStateLaunchDelay(TICKS nowTicks, int nextSleep) {
             /* Log a few comments that will explain the JVM behavior. */
             if (wrapperData->isDebugging) {
                 log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_DEBUG,
-                    TEXT("Ping settings: wrapper.ping.interval=%d, wrapper.ping.interval.logged=%d, wrapper.ping.timeout=%d"),
-                    wrapperData->pingInterval, wrapperData->pingIntervalLogged, wrapperData->pingTimeout);
+                    TEXT("%s wrapper.startup.timeout=%d, wrapper.startup.delay.console=%d, wrapper.startup.delay.service=%d, wrapper.restart.delay=%d"),
+                    TEXT("Startup Timeouts:"),
+                    wrapperData->startupTimeout, wrapperData->startupDelayConsole, wrapperData->startupDelayService, wrapperData->restartDelay);
+                log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_DEBUG,
+                    TEXT("%s wrapper.ping.interval=%d, wrapper.ping.interval.logged=%d, wrapper.ping.timeout=%d, wrapper.ping.alert.threshold=%d"),
+                    TEXT("Ping settings:"),
+                    wrapperData->pingInterval, wrapperData->pingIntervalLogged, wrapperData->pingTimeout, wrapperData->pingAlertThreshold);
+                log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_DEBUG,
+                    TEXT("%s wrapper.startup.timeout=%d, wrapper.shutdown.timeout=%d, wrapper.jvm_exit.timeout=%d, wrapper.jvm_cleanup.timeout=%d, wrapper.jvm_terminate.timeout=%d"),
+                    TEXT("Shutdown Timeouts:"),
+                    wrapperData->shutdownTimeout, wrapperData->jvmExitTimeout, wrapperData->jvmCleanupTimeout, wrapperData->jvmTerminateTimeout);
             }
 
             if (wrapperData->jvmRestarts > 0) {

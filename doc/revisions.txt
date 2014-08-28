@@ -1,6 +1,123 @@
 Java Service Wrapper Revision History.
 --------------------------------------
 
+3.5.25
+* (Professional) Improve the wrapper.timer.<n>.interval property so it is now
+  possible to specify ranges and lists of values as well as offsets for
+  interval values to more precisely control when timers are fired.
+* (Professional) Fix a problem with the wrapper.timer.<n>.interval property
+  where timers would not fire during an interval the system time was set back.
+  Also fixed a problem where timers would stop firing permanently if the system
+  time was set forward by more than the value of the wrapper.timer.max_catchup
+  property and a timer had been scheduled to be fired during that interval.
+  Both of these issues were most likely during daylight savings time.
+* Fix a problem where signals received by the JVM were not being logged in
+  debug output correctly if the wrapper.ignore_signals property is set to true.
+  We now also log debug output even if a user event listener consumes the
+  signal event.
+* Fix a problem on Gentoo Linux where the shell script was not correctly
+  detecting the system architecture.  This may also be a problem on other
+  distributions whose 'uname -p' returns a detailed architecture.
+* In the shell script, when the flag to use systemd (USE_SYSTEMD) is set,
+  the shell script generates a ".service" file in /etc/systemd/system/
+  when installing the Wrapper as a daemon.
+* In the shell script, add a function to validate the size of APP_NAME when
+  installing or removing the daemon on AIX.
+* It was possible to disable the logging of the Java command line even when
+  debug output was enabled by setting the wrapper.java.command.loglevel
+  property to NONE.  This made it difficult to debug problems and is no longer
+  possible.
+* When the wrapper.java.version.output property is set to true, add debug log
+  output to show the actual command line used.
+* Fix a problem on Windows when the wrapper.java.version.output property is
+  true where it was possible that java executable being run to get the version
+  could be different than that used to run the application if the java
+  executable was being located on the default system PATH as well as the PATH
+  defined in the environment.  The Wrapper now looks once and uses the same
+  fully resolved path in both places. For clarity, both java command lines are
+  now included in debug log output when the version is requested. (Bug #288)
+* Change the timing of the logging of the Java command line on UNIX so it is
+  consistent with Windows.
+* Improve the error message text thrown when a native feature is not available
+  from Java to be more clear about whether the problem is that the native
+  library could not be loaded versus the wrong edition being used.
+* On Windows, detect when the Wrapper is running under Cygwin and set the 
+  default value for wrapper.console.flush to TRUE. On other platforms, 
+  the script will display a message and stop running.
+* (Professional) Add support for WRAPPER_EVENT_TIME_* and WRAPPER_EVENT_RAND_*
+  variable references so event times can be used when events are fired.
+* Fix a buffer overflow problem on AIX which caused crashes or deadlocks on
+  startup for some users.  This had been an issue since 3.5.0 but only reported
+  recently.
+* Remove output debug messages on UNIX when the wrapper.port.address property
+  was set.
+* Clean up code when converting multibyte characters to wide characters. Some 
+  error checks were not implemented correctly. Found during a code review and
+  is not known to have actually caused any problems.
+
+3.5.24
+* Fix a problem where the message source of remote syslog messages from the JVM
+  were being logged as "jvm %d" rather than "jvm 1".
+* Add a new wrapper.syslog.split_messages property which controls whether or
+  not multi-line messages will be logged as is or first split into individual
+  lines.
+* Fix a problem on Windows Vista and above where the wrapper.single_invocation
+  property was not correctly identifying Wrapper instances running in different
+  sessions under some circumstances.
+
+3.5.23
+* Clean up the error messages logged when the Wrapper failed to elevate itself
+  on Windows platforms.  They are now more informative.
+* (Professional) Fix a handle leak on Windows in WrapperProcess.isAlive().
+* (Professional) Modify the exception thrown when WrapperManager.exec is called
+  while the Wrapper is shutdown so it now says that rather than saying that the
+  native library is not loaded.
+* (Processional) The Wrapper is now more careful to make sure that the backend
+  is never closed while a child process is being launched to ensure that the
+  Wrapper knows about all child processes launched.
+* (Professional) Add a warning message in case the Wrapper is not notified of
+  a launched child process due to the backend connection being closed.
+* (Professional) Fix a potential NPE that could be thrown while reading stdout
+  or stderr output from a child process while the Wrapper was shutting down and
+  after the child process exited.
+* (Professional) Fix a problem on UNIX platforms where we were getting stuck
+  trying to cleanup after a process which was currently blocking on a read from
+  stdout or stderr.
+* (Professional) Fix a problem on UNIX platforms where a timeout attempting to
+  obtain an internal lock of the child process list was causing an internal
+  counter to get out of sync, leading to a other terminated child processes
+  being left as defunct zombies until the Java process terminated.
+* (Professional) Fix a problem on UNIX platforms where pipe file descriptions
+  used to communicate with child processes were being incorrectly passed to all
+  child processes.  They were not growing over time.
+* (Professional) Fix a potential synchronization problem calling
+  WrapperProcess.waitFor() or WrapperProcess.exitValue().
+* Add additional debug log output showing the various timeout values to help
+  with debugging user issues.
+* Fix a problem where the shell script was not correctly detecting the OS
+  version with Mac OSX Maverick.
+* Add warnings about undefined environment variables in include file references
+  in the configuration file.
+* Add support for environment variable expansion in files specified with the
+  wrapper.java.additional_file and wrapper.app.parameter_file properties.
+* Correct the integer formatting in the WrapperUNIXGroup.toString() method so
+  it is consistent with the rest of the Wrapper.
+* Fix a problem where the iconv library requirement couldn't be satisfied in 
+  FreeBSD 10.  We now locate the library dynamically by looking for
+  /usr/local/lib/libiconv.so, /usr/local/lib/libbiconv.so, or
+  /lib/libkiconv.so.4 in that order.
+* Fix a the WrapperPrintStream.println method so strings containing linefeeds
+  will correctly have each line prepended with the configured header.
+* (Standard, Professional) When an unknown license type is encountered, include
+  the unknown type in the error message to help with debugging.
+* (Standard, Professional) Fix a problem on FreeBSD systems where the
+  wrapper.lang.encoding was not resolving to UTF-8 correctly when the LANG
+  environment variable was not set.
+* (Professional) Fix a memory corruption problem on z/OS when the language was
+  set to a double byte locale like Japanese.
+* Go through and make the Wrapper much more durable when badly encoded double
+  byte characters are encountered.
+
 3.5.22
 * (Standard, Professional) Fix a crash in native code behind WrapperResources
   instances which could happen if the system was very low on memory. Since
@@ -30,7 +147,7 @@ Java Service Wrapper Revision History.
   was not being recognized if a wrapper.lang value was not set.
 * (Standard, Professional) Fix a small memory leak resolving the language to
   run the Wrapper with.
-* (Professional) Fix a potential buffer overlow reading data from a child
+* (Professional) Fix a potential buffer overflow reading data from a child
   process stderr or stdout if the amount of data available in the pipe is
   larger than the buffer length passed in to WrapperProcessInputStream.
   read(byte b[], int off, int len).
@@ -110,11 +227,11 @@ Java Service Wrapper Revision History.
 * Add a new wrapper.property_warning.loglevel property which controls the log
   level at which the Wrapper will log warnings about undefined but referenced
   environment variables, as well as invalid boolean or integer values.
-* Update the way environment variables withing property values are parsed to
-  make it possible to report those are not defined.  Each pair of '%'s is now
-  expected to be part of a variable reference.  For example "%AAA%BBB%CCC%",
-  previosly if "AAA" was not defined, "BBB" would be located, but now only
-  "AAA" and "CCC" will be recognized as variables.
+* Update the way environment variable references within property values are
+  parsed to make it possible to report those which are not defined.  Each pair
+  of '%'s is now expected to be part of a variable reference.  For example
+  "%AAA%BBB%CCC%", previously if "AAA" was not defined, "BBB" would be located,
+  but now only "AAA" and "CCC" will be recognized as variables.
 * Fix a problem on Windows where a non-existent wrapper.working.dir directory
   was causing multiple error messages in the log file.
 * Modify the way the wrapper.environment.dump property works so it will now
@@ -213,7 +330,7 @@ Java Service Wrapper Revision History.
   functions.
 * Added wrapper.app.parameter_file property, which works similar to the
   wrapper.java.additional_file property
-* Reduce CPU-consuption of WrapperProcess.waitFor() function
+* Reduce CPU-consumption of WrapperProcess.waitFor() function
 
 3.5.16
 * (Standard, Professional) Retry failed share mappings if the target host or
@@ -223,7 +340,7 @@ Java Service Wrapper Revision History.
   feature to run the child process in the logged on users desktop was
   only allowing to create a process once per second.
 * Include information about the base configuration file in the debug output
-  when debugging of cacading configuration files has been enabled.
+  when debugging of cascading configuration files has been enabled.
 * Add a check in the UNIX script to output a more descriptive error message,
   when the user specified in the RUN_AS_USER variable doesn't exist.
 * (Standard, Professional) Fix a problem where console log output was not being
@@ -264,7 +381,7 @@ Java Service Wrapper Revision History.
 * Add support for Linux on ARM systems.
 * Re-Enabled the forced reloading of the SYSTEM (and if set to a specific
   account, the user) registry before launching the Wrapper as a service on
-  Windows XP and 2003. This has been originally disabeld for Windows XP and
+  Windows XP and 2003. This has been originally disabled for Windows XP and
   2003 since version 3.5.5.
 * (Standard, Professional) Fix a problem where the instance class names logged
   when a deadlock involving ReentrantLock instances were corrupted.  The actual
@@ -291,6 +408,8 @@ Java Service Wrapper Revision History.
   platform and stayed defunct after a forced kill until the Wrapper process
   itself stopped. This was especially noticeable if the JVM is frozen and the
   JVM is being killed forcibly.
+* Add additional debug log output showing the various timeout values to help
+  with debugging user issues.
 
 3.5.15
 * Add a new _WRAPPER_CONF_OVERRIDE setting to the Wrapper dedicated command
