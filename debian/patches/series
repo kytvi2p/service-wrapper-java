@@ -1,3 +1,4 @@
 bashisms_690722.patch
 0002-kfreebsd-support.patch
 0003-additional-makefiles.patch
+0004-ldflags.patch

@@ -14,7 +14,8 @@ export DEB_HOST_ARCH := $(shell dpkg-architecture -qDEB_HOST_ARCH)
 export DEB_HOST_ARCH_CPU := $(shell dpkg-architecture -qDEB_HOST_ARCH_CPU)
 
 export JAVA_HOME=/usr/lib/jvm/default-java
-export DEB_BUILD_HARDENING=1
+CFLAGS:=$(shell dpkg-buildflags --get CFLAGS)
+LDFLAGS:=$(shell dpkg-buildflags --get LDFLAGS)
 
 %:
 	dh $@  --with javahelper
