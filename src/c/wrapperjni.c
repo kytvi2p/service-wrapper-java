@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999, 2013 Tanuki Software, Ltd.
+ * Copyright (c) 1999, 2014 Tanuki Software, Ltd.
  * http://www.tanukisoftware.com
  * All rights reserved.
  *
@@ -39,8 +39,9 @@
  #define dup2 _dup2
 #endif
 #include "wrapper_i18n.h"
-#include "wrapperinfo.h"
+#include "loggerjni.h"
 #include "wrapperjni.h"
+#include "wrapperinfo.h"
 
 int wrapperJNIDebugging = JNI_FALSE;
 
@@ -83,6 +84,7 @@ char *utf8MethodGetProperties;
 char *utf8SigVrLjavaUtilProperties;
 char *utf8MethodGetProperty;
 char *utf8SigLjavaLangStringrLjavaLangString;
+char *utf8javaIOIOException; /* "java/io/IOException" */
 
 #ifdef WIN32
 #else
@@ -136,68 +138,6 @@ int wrapperSleep(int ms) {
 }
 
 /**
- * Create an error message from GetLastError() using the
- *  FormatMessage API Call...
- */
-#ifdef WIN32
-TCHAR lastErrBuf[1024];
-TCHAR* getLastErrorText() {
-    DWORD dwRet;
-    LPTSTR lpszTemp = NULL;
-
-    dwRet = FormatMessage(FORMAT_MESSAGE_ALLOCATE_BUFFER |
-                           FORMAT_MESSAGE_FROM_SYSTEM |FORMAT_MESSAGE_ARGUMENT_ARRAY,
-                           NULL,
-                           GetLastError(),
-                           LANG_NEUTRAL,
-                           (LPTSTR)&lpszTemp,
-                           0,
-                           NULL);
-
-    /* supplied buffer is not long enough */
-    if (!dwRet || ((long)1023 < (long)dwRet+14)) {
-        lastErrBuf[0] = TEXT('\0');
-    } else {
-        lpszTemp[lstrlen(lpszTemp)-2] = TEXT('\0');  /*remove cr and newline character */
-        _sntprintf( lastErrBuf, 1024, TEXT("%s (0x%x)"), lpszTemp, GetLastError());
-    }
-
-    /* following the documentation of FormatMessage, LocalFree should be called to free the output buffer. */
-    if (lpszTemp) {
-        LocalFree(lpszTemp);
-    }
-
-    return lastErrBuf;
-}
-int getLastError() {
-    return GetLastError();
-}
-#else
-TCHAR* getLastErrorText() {
-
-#ifdef UNICODE
-    char* c;
-    TCHAR* t;
-    size_t req;
-    c = strerror(errno);
-    req = mbstowcs(NULL, c, 0);
-    t = malloc(req);
-    if (!t) {
-        return NULL;
-    }
-    mbstowcs(t, c, req);
-    return t;
-
-#else
-    return strerror(errno);
-#endif
-}
-int getLastError() {
-    return errno;
-}
-#endif
-
-/**
  * Create a jstring from a Wide Char string.  The jstring must be freed up by caller.
  *
  * @param env The current JNIEnv.
@@ -224,26 +164,31 @@ jstring JNU_NewStringNative(JNIEnv *env, const TCHAR *strW) {
         size = WideCharToMultiByte(CP_UTF8, 0, strW, -1, NULL, 0, NULL, NULL);
         if (size == 0) {
             /* Failed. */
-            _tprintf(TEXT("WrapperJNI Warn: Failed to convert string \"%s\": %s\n"), strW, GetLastError()); fflush(NULL);
+            _tprintf(TEXT("WrapperJNI Warn: Failed to convert string \"%s\": %s\n"), strW, getLastErrorText()); fflush(NULL);
             return NULL;
         }
-        msgMB = malloc(sizeof(char) * size);
+        msgMB = malloc(sizeof(char) * (size + 1));
         if (!msgMB) {
             throwOutOfMemoryError(env, TEXT("JNSN1"));
             return NULL;
         }
-        WideCharToMultiByte(CP_UTF8, 0, strW, -1, msgMB, size, NULL, NULL);
+        WideCharToMultiByte(CP_UTF8, 0, strW, -1, msgMB, size + 1, NULL, NULL);
         result = (*env)->NewStringUTF(env, msgMB);
         free(msgMB);
         return result;
  #else
-        size = wcstombs(NULL, strW, 0) + 1;
-        msgMB = malloc(sizeof(char) * size);
+        size = wcstombs(NULL, strW, 0);
+        if (size == (size_t)-1) {
+            _tprintf(TEXT("Invalid multibyte sequence \"%s\": %s\n"), strW, getLastErrorText());
+            return NULL;
+        }
+
+        msgMB = malloc(sizeof(char) * (size + 1));
         if (!msgMB) {
             throwOutOfMemoryError(env, TEXT("JNSN2"));
             return NULL;
         }
-        wcstombs(msgMB, strW, size);
+        wcstombs(msgMB, strW, size + 1);
  #endif
     } else {
         /* Empty string. */
@@ -369,14 +314,20 @@ TCHAR *JNU_GetStringNativeChars(JNIEnv *env, jstring jstr) {
     free(result);
     return tresult;
 #else
-    size = (mbstowcs(NULL, result, 0) + 1) * sizeof(TCHAR);
-    tresult = malloc(size);
+    size = mbstowcs(NULL, result, MBSTOWCS_QUERY_LENGTH);
+    if (size == (size_t)-1) {
+        throwJNIError(env, TEXT("Encoding error."));
+        return NULL;
+    }
+    tresult = malloc(sizeof(TCHAR) * (size + 1));
     if (!tresult) {
         free(result);
         throwOutOfMemoryError(env, TEXT("GSNC3"));
         return NULL;
     }
-    mbstowcs(tresult, result, size);
+    mbstowcs(tresult, result, size + 1);
+    tresult[size] = TEXT('\0'); /* Avoid bufferflows caused by badly encoded characters. */
+    
     free(result);
     return tresult;
 #endif
@@ -461,6 +412,7 @@ void initUTF8Strings(JNIEnv *env) {
     utf8SigVrLjavaUtilProperties = getUTF8Chars(env, "()Ljava/util/Properties;");
     utf8MethodGetProperty = getUTF8Chars(env, "getProperty");
     utf8SigLjavaLangStringrLjavaLangString = getUTF8Chars(env, "(Ljava/lang/String;)Ljava/lang/String;");
+    utf8javaIOIOException = getUTF8Chars(env, "java/io/IOException");
     
 #ifdef WIN32
 #else
@@ -469,7 +421,7 @@ void initUTF8Strings(JNIEnv *env) {
     utf8MethodAddGroup = getUTF8Chars(env, "addGroup");
     utf8SigIIStringStringStringStringrV = getUTF8Chars(env, "(IILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V");
     utf8SigIStringrV = getUTF8Chars(env, "(ILjava/lang/String;)V");
-#endif	
+#endif
 }
 
 /**
@@ -557,10 +509,16 @@ int getSystemProperty(JNIEnv *env, const TCHAR *propertyName, TCHAR **propertyVa
 
 /**
  * Do common initializaion.
+ *
+ * @return TRUE if there were any problems.
  */
-void initCommon(JNIEnv *env, jclass jClassWrapperManager) {
-    TCHAR* outfile, *errfile;
-    int outfd, errfd, mode, options;
+int initCommon(JNIEnv *env, jclass jClassWrapperManager) {
+    TCHAR* outfile;
+    TCHAR* errfile;
+    int outfd;
+    int errfd;
+    int mode;
+    int options;
 
 #ifdef WIN32
     mode = _S_IWRITE;
@@ -573,30 +531,32 @@ void initCommon(JNIEnv *env, jclass jClassWrapperManager) {
 
     if (getSystemProperty(env, TEXT("wrapper.java.errfile"), &errfile, FALSE)) {
         /* Failed */
-        return;
+        return TRUE;
     }
     if (errfile) {
         _ftprintf(stderr, TEXT("WrapperJNI: Redirecting %s to file %s...\n"), TEXT("StdErr"), errfile); fflush(NULL);
         if (((errfd = _topen(errfile, options, mode)) == -1) || (dup2(errfd, STDERR_FILENO) == -1)) {
-            _ftprintf(stderr, TEXT("WrapperJNI: Failed to redirect %s to file %s  (Err: %s)\n"), TEXT("StdErr"), errfile, getLastErrorText()); fflush(NULL);
-            return;
+            throwThrowable(env, utf8javaIOIOException, TEXT("Failed to redirect %s to file %s  (Err: %s)"), TEXT("StdErr"), errfile, getLastErrorText());
+            return TRUE;
         } else {
             redirectedStdErr = TRUE;
         }
     }
     if (getSystemProperty(env, TEXT("wrapper.java.outfile"), &outfile, FALSE)) {
         /* Failed */
-        return;
+        return TRUE;
     }
     if (outfile) {
         _tprintf(TEXT("WrapperJNI: Redirecting %s to file %s...\n"), TEXT("StdOut"), outfile); fflush(NULL);
         if (((outfd = _topen(outfile, options, mode)) == -1) || (dup2(outfd, STDOUT_FILENO) == -1)) {
-            _tprintf(TEXT("WrapperJNI: Failed to redirect %s to file %s  (Err: %s)\n"), TEXT("StdOut"), errfile, getLastErrorText()); fflush(NULL);
-            return;
+            throwThrowable(env, utf8javaIOIOException, TEXT("Failed to redirect %s to file %s  (Err: %s)"), TEXT("StdOut"), outfile, getLastErrorText());
+            return TRUE;
         } else {
             redirectedStdOut = TRUE;
         }
     }
+    
+    return FALSE;
 }
 
 void throwThrowable(JNIEnv *env, char *throwableClassName, const TCHAR *lpszFmt, ...) {

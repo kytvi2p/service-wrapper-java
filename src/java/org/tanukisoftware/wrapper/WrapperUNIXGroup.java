@@ -1,7 +1,7 @@
 package org.tanukisoftware.wrapper;
 
 /*
- * Copyright (c) 1999, 2013 Tanuki Software, Ltd.
+ * Copyright (c) 1999, 2014 Tanuki Software, Ltd.
  * http://www.tanukisoftware.com
  * All rights reserved.
  *
@@ -48,7 +48,12 @@ public class WrapperUNIXGroup
     
     public String toString()
     {
-        return WrapperManager.getRes().getString( "WrapperUNIXGroup[{0}, {1}]", new Integer( getGID() ), getGroup() );
+        StringBuffer sb = new StringBuffer();
+        sb.append( "WrapperUNIXGroup[" );
+        sb.append( getGID() );
+        sb.append( getGroup() );
+        sb.append( "]" );
+        return sb.toString();
     }
 }
 

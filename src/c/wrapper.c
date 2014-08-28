@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999, 2013 Tanuki Software, Ltd.
+ * Copyright (c) 1999, 2014 Tanuki Software, Ltd.
  * http://www.tanukisoftware.com
  * All rights reserved.
  *
@@ -68,11 +68,6 @@
   #define _INTPTR_T_DEFINED
  #endif
 
- #define EADDRINUSE  WSAEADDRINUSE
- #define EWOULDBLOCK WSAEWOULDBLOCK
- #define ENOTSOCK    WSAENOTSOCK
- #define ECONNRESET  WSAECONNRESET
-
 #else /* UNIX */
  #include <ctype.h>
  #include <string.h>
@@ -115,6 +110,17 @@
 
 extern char** environ;
 #endif /* WIN32 */
+
+/* Define some common defines to make cross platform code a bit cleaner. */
+#ifdef WIN32
+ #define WRAPPER_EADDRINUSE  WSAEADDRINUSE
+ #define WRAPPER_EWOULDBLOCK WSAEWOULDBLOCK
+ #define WRAPPER_EACCES      WSAEACCES
+#else
+ #define WRAPPER_EADDRINUSE  EADDRINUSE
+ #define WRAPPER_EWOULDBLOCK EWOULDBLOCK
+ #define WRAPPER_EACCES      EACCES
+#endif
 
 WrapperConfig *wrapperData;
 TCHAR         packetBuffer[MAX_LOG_SIZE + 1];
@@ -295,7 +301,7 @@ void wrapperAddDefaultProperties() {
             free(confDirTemp);
             return;
         }
-        if (_trealpath(confDirTemp, wrapperData->confDir) == NULL) {
+        if (_trealpathN(confDirTemp, wrapperData->confDir, PATH_MAX + 1) == NULL) {
             log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_FATAL,
                 TEXT("Unable to resolve the original working directory: %s"), getLastErrorText());
             free(confDirTemp);
@@ -410,7 +416,7 @@ int loadEnvironment() {
 #else
     i = 0;
     while (environment[i]) {
-        len = mbstowcs(NULL, environment[i], 0);
+        len = mbstowcs(NULL, environment[i], MBSTOWCS_QUERY_LENGTH);
         if (len == (size_t)-1) {
             /* Invalid string.  Skip. */
         } else {
@@ -421,6 +427,7 @@ int loadEnvironment() {
                 return TRUE;
             }
             mbstowcs(sourcePair, environment[i], len + 1);
+            sourcePair[len] = TEXT('\0'); /* Avoid bufferflows caused by badly encoded characters. */
 #endif
 
             len = _tcslen(sourcePair);
@@ -577,9 +584,31 @@ void dumpEnvironment(int logLevel) {
     log_printf(WRAPPER_SOURCE_WRAPPER, logLevel, TEXT(""));
 }
 
+#ifdef WIN32
+/**
+ * Check if the Wrapper is running under cygwin terminal.
+ * I'm looking for the environment variable TERM to be equal to "xterm".
+ * I tried with OSTYPE and MACHTYPE, but _tgetenv always returns NULL.
+ * @return TRUE if under cygwin, otherwise returns FALSE
+ */
+int isCygwin() {
+    TCHAR *osType;
+    int retVal = FALSE;
+    
+    osType = _tgetenv(TEXT("TERM"));
+    
+    if ((osType != NULL) && (_tcscmp(osType, TEXT("xterm")) == 0)) {
+        retVal = TRUE;
+    } 
+
+    return retVal;
+}
+#endif
+
 void wrapperLoadLoggingProperties(int preload) {
     const TCHAR *logfilePath;
     int logfileRollMode;
+    int underCygwin = FALSE;
     
     setLogPropertyWarnings(properties, !preload);
     
@@ -637,8 +666,13 @@ void wrapperLoadLoggingProperties(int preload) {
 
     setConsoleLogLevel(getStringProperty(properties, TEXT("wrapper.console.loglevel"), TEXT("INFO")));
 
+#ifdef WIN32
+    /* check if the current instance of the Wrapper is running under Cygwin */
+    underCygwin = isCygwin();
+#endif
+
     /* Load the console flush flag. */
-    setConsoleFlush(getBooleanProperty(properties, TEXT("wrapper.console.flush"), FALSE));
+    setConsoleFlush(getBooleanProperty(properties, TEXT("wrapper.console.flush"), FALSE || underCygwin));
 
 #ifdef WIN32
     /* Load the console direct flag. */
@@ -653,6 +687,9 @@ void wrapperLoadLoggingProperties(int preload) {
 
     /* Load syslog log level */
     setSyslogLevel(getStringProperty(properties, TEXT("wrapper.syslog.loglevel"), TEXT("NONE")));
+    
+    /* Load syslog split messages flag. */
+    setSyslogSplitMessages(getBooleanProperty(properties, TEXT("wrapper.syslog.split_messages"), FALSE));
 
 #ifndef WIN32
     /* Load syslog facility */
@@ -739,7 +776,7 @@ int wrapperLoadConfigurationProperties(int preload) {
             outOfMemory(TEXT("WLCP"), 4);
             return TRUE;
         }
-        if (_trealpath(TEXT("."), wrapperData->originalWorkingDir) == NULL) {
+        if (_trealpathN(TEXT("."), wrapperData->originalWorkingDir, PATH_MAX + 1) == NULL) {
             log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_FATAL,
                 TEXT("Unable to resolve the original working directory: %s"), getLastErrorText());
             return TRUE;
@@ -782,7 +819,7 @@ int wrapperLoadConfigurationProperties(int preload) {
             outOfMemory(TEXT("WLCP"), 2);
             return TRUE;
         }
-        if (_trealpath(wrapperData->argConfFile, wrapperData->configFile) == NULL) {
+        if (_trealpathN(wrapperData->argConfFile, wrapperData->configFile, PATH_MAX + 1) == NULL) {
             /* Most likely the file does not exist.  The wrapperData->configFile has the first
              *  file that could not be found.  May not be the config file directly if symbolic
              *  links are involved. */
@@ -887,7 +924,7 @@ int wrapperLoadConfigurationProperties(int preload) {
                 outOfMemory(TEXT("WLCP"), 6);
                 return TRUE;
             }
-            if (_trealpath(prop, wrapperData->workingDir) == NULL) {
+            if (_trealpathN(prop, wrapperData->workingDir, PATH_MAX + 1) == NULL) {
                 log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_FATAL,
                     TEXT("Unable to resolve the working directory %s: %s"), prop, getLastErrorText());
                 return TRUE;
@@ -1177,20 +1214,20 @@ void protocolStartServerSocket() {
         }
         WideCharToMultiByte(CP_OEMCP, 0, wrapperData->portAddress, -1, tempAddress, (int)len, NULL, NULL);
 #else
-        len = wcstombs(NULL, wrapperData->portAddress, 0) + 1;
-        _tprintf(TEXT("%d  hanth %s\n"), len, wrapperData->portAddress);
+        len = wcstombs(NULL, wrapperData->portAddress, 0);
+        /* _tprintf(TEXT("%d  hanth %s\n"), len, wrapperData->portAddress); */
         if (len == (size_t)-1) {
             log_printf(WRAPPER_SOURCE_PROTOCOL, LEVEL_WARN,
                 TEXT("Invalid multibyte sequence in port address \"%s\" : %s"), wrapperData->portAddress, getLastErrorText());
             return;
         }
-        tempAddress = malloc(len);
+        tempAddress = malloc(len + 1);
         if (!tempAddress) {
             outOfMemory(TEXT("PSSS"), 2);
             return;
         }
-        wcstombs(tempAddress, wrapperData->portAddress, len);
-        _tprintf(TEXT("%d  hanth % s\n"), len, tempAddress);
+        wcstombs(tempAddress, wrapperData->portAddress, len + 1);
+        /* _tprintf(TEXT("%d  hanth % s\n"), len, tempAddress); */
 #endif
         addr_srv.sin_addr.s_addr = inet_addr(tempAddress);
         free(tempAddress);
@@ -1209,12 +1246,8 @@ void protocolStartServerSocket() {
         rc = wrapperGetLastError();
 
         /* The specified port could bot be bound. */
-        if (rc == EADDRINUSE ||
-#ifdef WIN32
-            rc == WSAEACCES) {
-#else 
-            rc == EACCES) {
-#endif
+        if ((rc == WRAPPER_EADDRINUSE) || (rc == WRAPPER_EACCES)) {
+
             /* Address in use, try looking at the next one. */
             if (fixedPort) {
                 /* The last port checked was the defined fixed port, switch to the dynamic range. */
@@ -1352,7 +1385,7 @@ void protocolOpenSocket() {
     if (newBackendSD == INVALID_SOCKET) {
         rc = wrapperGetLastError();
         /* EWOULDBLOCK != EAGAIN on some platforms. */
-        if ((rc == EWOULDBLOCK) || (rc == EAGAIN)) {
+        if ((rc == WRAPPER_EWOULDBLOCK) || (rc == EAGAIN)) {
             /* There are no incomming sockets right now. */
             return;
         } else {
@@ -1390,6 +1423,11 @@ void protocolOpenSocket() {
         int req;
 #ifdef WIN32
         req = MultiByteToWideChar(CP_OEMCP, 0, inet_ntoa(addr_srv.sin_addr), -1, NULL, 0);
+        if (req <= 0) {
+            log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_WARN,
+                    TEXT("Invalid multibyte sequence in protocol message \"%s\" : %s"), inet_ntoa(addr_srv.sin_addr), getLastErrorText());
+            return;
+        }
         socketSource = malloc(sizeof(TCHAR) * (req + 1));
         if (!socketSource) {
             outOfMemory(TEXT("PO"), 1);
@@ -1398,13 +1436,19 @@ void protocolOpenSocket() {
         MultiByteToWideChar(CP_OEMCP, 0, inet_ntoa(addr_srv.sin_addr), -1, socketSource, req + 1);
 #else
 
-        req = mbstowcs(NULL, inet_ntoa(addr_srv.sin_addr), 0);
+        req = mbstowcs(NULL, inet_ntoa(addr_srv.sin_addr), MBSTOWCS_QUERY_LENGTH);
+        if (req == (size_t)-1) {
+            log_printf(WRAPPER_SOURCE_PROTOCOL, LEVEL_WARN,
+                    TEXT("Invalid multibyte sequence in protocol message \"%s\" : %s"), inet_ntoa(addr_srv.sin_addr), getLastErrorText());
+            return;
+        }
         socketSource = malloc(sizeof(TCHAR) * (req + 1));
         if (!socketSource) {
             outOfMemory(TEXT("PO"), 2);
             return;
         }
         mbstowcs(socketSource, inet_ntoa(addr_srv.sin_addr), req + 1);
+        socketSource[req] = TEXT('\0'); /* Avoid bufferflows caused by badly encoded characters. */
 #endif
         log_printf(WRAPPER_SOURCE_PROTOCOL, LEVEL_DEBUG, TEXT("accepted a socket from %s on port %d"),
                  socketSource, ntohs(addr_srv.sin_port));
@@ -1759,20 +1803,20 @@ int wrapperProtocolFunction(char function, const TCHAR *messageW) {
                 }
             }
  #else
-            len = wcstombs(NULL, messageW, 0) + 1;
+            len = wcstombs(NULL, messageW, 0);
             if (len == (size_t)-1) {
                 log_printf(WRAPPER_SOURCE_PROTOCOL, LEVEL_WARN,
                     TEXT("Invalid multibyte sequence in protocol message \"%s\" : %s"), messageW, getLastErrorText());
                 returnVal = TRUE;
                 ok = FALSE;
             } else {
-                messageMB = malloc(len);
+                messageMB = malloc(len + 1);
                 if (!messageMB) {
                     outOfMemory(TEXT("WPF"), 2);
                     returnVal = TRUE;
                     ok = FALSE;
                 } else {
-                    wcstombs(messageMB, messageW, len);
+                    wcstombs(messageMB, messageW, len + 1);
                 }
             }
  #endif
@@ -1866,9 +1910,9 @@ int wrapperProtocolFunction(char function, const TCHAR *messageW) {
                     rc = send(protocolActiveBackendSD, protocolSendBuffer, sizeof(char) * (int)len, 0);
 
                     cnt++;
-                } while ((rc == SOCKET_ERROR) && (wrapperGetLastError() == EWOULDBLOCK) && (cnt < 200));
+                } while ((rc == SOCKET_ERROR) && (wrapperGetLastError() == WRAPPER_EWOULDBLOCK) && (cnt < 200));
                 if (rc == SOCKET_ERROR) {
-                    if (wrapperGetLastError() == EWOULDBLOCK) {
+                    if (wrapperGetLastError() == WRAPPER_EWOULDBLOCK) {
                         log_printf(WRAPPER_SOURCE_PROTOCOL, LEVEL_WARN, TEXT(
                             "socket send failed.  Blocked for 2 seconds.  %s"),
                             getLastErrorText());
@@ -2029,7 +2073,7 @@ int wrapperProtocolRead() {
             len = recv(protocolActiveBackendSD, (void*) &c, 1, 0);
             if (len == SOCKET_ERROR) {
                 err = wrapperGetLastError();
-                if ((err != EWOULDBLOCK) &&  /* Windows - Would block. */
+                if ((err != WRAPPER_EWOULDBLOCK) &&  /* Windows - Would block. */
                     (err != EAGAIN)) {       /* UNIX - Would block. */
                     if (wrapperData->isDebugging) {
                         log_printf(WRAPPER_SOURCE_PROTOCOL, LEVEL_DEBUG, TEXT("socket read failed. (%s)"), getLastErrorText());
@@ -2106,7 +2150,7 @@ int wrapperProtocolRead() {
             len = read(protocolActiveServerPipeIn, (void*) &c, 1);
             if (len == SOCKET_ERROR) {
                 err = wrapperGetLastError();
-                if ((err != EWOULDBLOCK) &&  /* Windows - Would block. */
+                if ((err != WRAPPER_EWOULDBLOCK) &&  /* Windows - Would block. */
                     (err != EAGAIN)) {       /* UNIX - Would block. */
                     if (wrapperData->isDebugging) {
                         log_printf(WRAPPER_SOURCE_PROTOCOL, LEVEL_DEBUG, TEXT("pipe read failed. (%s)"), getLastErrorText());
@@ -2287,6 +2331,7 @@ int wrapperInitialize() {
     wrapperSetJavaState(WRAPPER_JSTATE_DOWN_CLEAN, 0, -1);
     wrapperData->lastPingTicks = wrapperGetTicks();
     wrapperData->lastLoggedPingTicks = wrapperGetTicks();
+    wrapperData->jvmVersionCommand = NULL;
     wrapperData->jvmCommand = NULL;
     wrapperData->exitRequested = FALSE;
     wrapperData->restartRequested = WRAPPER_RESTART_REQUESTED_INITIAL; /* The first JVM needs to be started. */
@@ -2429,6 +2474,10 @@ void wrapperDataDispose() {
         wrapperData->portAddress = NULL;
     }
 #ifdef WIN32
+    if (wrapperData->jvmVersionCommand) {
+        free(wrapperData->jvmVersionCommand);
+        wrapperData->jvmVersionCommand = NULL;
+    }
     if (wrapperData->jvmCommand) {
         free(wrapperData->jvmCommand);
         wrapperData->jvmCommand = NULL;
@@ -2462,6 +2511,14 @@ void wrapperDataDispose() {
         wrapperData->ctrlCodeQueue = NULL;
     }
 #else
+    if(wrapperData->jvmVersionCommand) {
+        for (i = 0; wrapperData->jvmVersionCommand[i] != NULL; i++) {
+            free(wrapperData->jvmVersionCommand[i]);
+            wrapperData->jvmVersionCommand[i] = NULL;
+        }
+        free(wrapperData->jvmVersionCommand);
+        wrapperData->jvmVersionCommand = NULL;
+    }
     if(wrapperData->jvmCommand) {
         for (i = 0; wrapperData->jvmCommand[i] != NULL; i++) {
             free(wrapperData->jvmCommand[i]);
@@ -2574,16 +2631,16 @@ void wrapperDataDispose() {
 void wrapperDispose() {
     /* Make sure not to dispose twice.  This should not happen, but check for safety. */
     if (disposed) {
-       _tprintf(TEXT("wrapperDispose was called more than once."));
-       return;
+        /* Don't use log_printf here as the second call may have already disposed logging. */
+        _tprintf(TEXT("wrapperDispose was called more than once.\n"));
+        return;
     }
     disposed = TRUE;
 
 #ifdef WIN32
     if (protocolMutexHandle) {
         if (!CloseHandle(protocolMutexHandle)) {
-            _tprintf(TEXT("Unable to close protocol mutex handle. %s\n"), getLastErrorText());
-            fflush(NULL);
+            log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_FATAL, TEXT("Unable to close protocol mutex handle. %s"), getLastErrorText());
         }
     }
     
@@ -2666,7 +2723,7 @@ void wrapperGetFileBase(const TCHAR *fileName, TCHAR *baseName) {
 TCHAR *generateVersionBanner() {
     TCHAR *banner = TEXT("Java Service Wrapper %s Edition %s-bit %s\n  Copyright (C) 1999-%s Tanuki Software, Ltd. All Rights Reserved.\n    http://wrapper.tanukisoftware.com");
     TCHAR *product = TEXT("Community");
-    TCHAR *copyright = TEXT("2013");
+    TCHAR *copyright = TEXT("2014");
     TCHAR *buffer;
     size_t len;
 
@@ -3219,21 +3276,33 @@ void logChildOutput(const char* log) {
  #ifdef WIN32
     GetLocaleInfo(GetThreadLocale(), LOCALE_IDEFAULTANSICODEPAGE, buffer, sizeof(buffer));
     cp = _ttoi(buffer);
-    size = MultiByteToWideChar(cp, 0, log, -1 , NULL, 0) + 1;
-    tlog = (TCHAR*)malloc(size * sizeof(TCHAR));
+    size = MultiByteToWideChar(cp, 0, log, -1 , NULL, 0);
+    if (size <= 0) {
+        log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_WARN,
+                    TEXT("Invalid multibyte sequence in protocol message \"%s\" : %s"), log, getLastErrorText());
+        return;
+    }
+
+    tlog = (TCHAR*)malloc((size + 1) * sizeof(TCHAR));
     if (!tlog) {
         outOfMemory(TEXT("WLCO"), 1);
         return;
     }
-    MultiByteToWideChar(cp, 0, log, -1, (TCHAR*)tlog, size);
+    MultiByteToWideChar(cp, 0, log, -1, (TCHAR*)tlog, size + 1);
  #else
-    size = mbstowcs(NULL, log, 0) + 1;
-    tlog = malloc(size * sizeof(TCHAR));
+    size = mbstowcs(NULL, log, MBSTOWCS_QUERY_LENGTH);
+    if (size == (size_t)-1) {
+        log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_WARN,
+                    TEXT("Invalid multibyte sequence in protocol message \"%s\" : %s"), log, getLastErrorText());
+        return;
+    }
+    tlog = malloc(sizeof(TCHAR) * (size + 1));
     if (!tlog) {
         outOfMemory(TEXT("WLCO"), 1);
         return;
     }
-    mbstowcs(tlog, log, size);
+    mbstowcs(tlog, log, size + 1);
+    tlog[size] = TEXT('\0'); /* Avoid bufferflows caused by badly encoded characters. */
  #endif
 #else
     tlog = (TCHAR*)log;
@@ -3539,9 +3608,10 @@ void sendLogFileName() {
 
     currentLogFilePath = getCurrentLogfilePath();
 
-    wrapperProtocolFunction(WRAPPER_MSG_LOGFILE, currentLogFilePath);
-
-    free(currentLogFilePath);
+    if (currentLogFilePath) {
+        wrapperProtocolFunction(WRAPPER_MSG_LOGFILE, currentLogFilePath);
+        free(currentLogFilePath);
+    }
 }
 
 /**
@@ -4016,33 +4086,55 @@ int wrapperRunCommonInner() {
         tzset();
 #if defined(UNICODE)
  #if !defined(WIN32)
-        req = mbstowcs(NULL, tzname[0], 0) + 1;
-        tz1 = malloc(req * sizeof(TCHAR));
+        req = mbstowcs(NULL, tzname[0], MBSTOWCS_QUERY_LENGTH);
+        if (req == (size_t)-1) {
+            return 1;
+        }
+        tz1 = malloc(sizeof(TCHAR) * (req + 1));
         if (!tz1) {
             outOfMemory(TEXT("LHN"), 1);
         } else {
-            mbstowcs(tz1, tzname[0], req);
-            req = mbstowcs(NULL, tzname[1], 0) + 1;
-            tz2 = malloc(req * sizeof(TCHAR));
+            mbstowcs(tz1, tzname[0], req + 1);
+            tz1[req] = TEXT('\0'); /* Avoid bufferflows caused by badly encoded characters. */
+            
+            req = mbstowcs(NULL, tzname[1], MBSTOWCS_QUERY_LENGTH);
+            if (req == (size_t)-1) {
+                free(tz1);
+                return 1;
+            }
+            tz2 = malloc(sizeof(TCHAR) * (req + 1));
             if (!tz2) {
                 outOfMemory(TEXT("LHN"), 2);
                 free(tz1);
             } else {
-                mbstowcs(tz2, tzname[1], req);
+                mbstowcs(tz2, tzname[1], req + 1);
+                tz2[req] = TEXT('\0'); /* Avoid bufferflows caused by badly encoded characters. */
  #else
         req = MultiByteToWideChar(CP_OEMCP, 0, tzname[0], -1, NULL, 0);
-        tz1 = malloc(req * sizeof(TCHAR));
+        if (req <= 0) {
+            log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_WARN,
+                TEXT("Invalid multibyte sequence in port address \"%s\" : %s"), tzname[0], getLastErrorText());
+            return 1;
+        }
+
+        tz1 = malloc((req + 1) * sizeof(TCHAR));
         if (!tz1) {
             outOfMemory(TEXT("LHN"), 1);
         } else {
-            MultiByteToWideChar(CP_OEMCP,0, tzname[0], -1, tz1, (int)req);
+            MultiByteToWideChar(CP_OEMCP,0, tzname[0], -1, tz1, (int)req + 1);
             req = MultiByteToWideChar(CP_OEMCP, 0, tzname[1], -1, NULL, 0);
-            tz2 = malloc(req * sizeof(TCHAR));
+            if (req <= 0) {
+                free(tz1);
+                log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_WARN,
+                    TEXT("Invalid multibyte sequence in port address \"%s\" : %s"), tzname[1], getLastErrorText());
+                return 1;
+            }
+            tz2 = malloc((req  + 1) * sizeof(TCHAR));
             if (!tz2) {
                 free(tz1);
                 outOfMemory(TEXT("LHN"), 2);
             } else {
-                MultiByteToWideChar(CP_OEMCP,0, tzname[1], -1, tz2, (int)req);
+                MultiByteToWideChar(CP_OEMCP,0, tzname[1], -1, tz2, (int)req + 1);
  #endif
 
 #else
@@ -4050,17 +4142,17 @@ int wrapperRunCommonInner() {
         tz2 = tzname[1];
 #endif
 #ifndef FREEBSD
-        log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_DEBUG, TEXT("Timezone:     %s (%s) Offset: %ld, hasDaylight: %d"),
-                tz1, tz2, timezone, daylight);
+                log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_DEBUG, TEXT("Timezone:     %s (%s) Offset: %ld, hasDaylight: %d"),
+                        tz1, tz2, timezone, daylight);
 #else
-        log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_DEBUG, TEXT("Timezone:     %s (%s) Offset: %ld"),
+                log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_DEBUG, TEXT("Timezone:     %s (%s) Offset: %ld"),
                         tz1, tz2, timezone);
 #endif
-        if (wrapperData->useSystemTime) {
-            log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_DEBUG, TEXT("Using system timer."));
-        } else {
-            log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_DEBUG, TEXT("Using tick timer."));
-        }
+                if (wrapperData->useSystemTime) {
+                    log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_DEBUG, TEXT("Using system timer."));
+                } else {
+                    log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_DEBUG, TEXT("Using tick timer."));
+                }
 #ifdef UNICODE
                 free(tz1);
                 free(tz2);
@@ -4078,6 +4170,10 @@ int wrapperRunCommonInner() {
                 log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_DEBUG, TEXT("Operating System ID: %s"), szOS);
             }
             free(szOS);
+        }
+        
+        if (isCygwin()) {
+            log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_DEBUG, TEXT("Cygwin detected"));
         }
     }
 #endif
@@ -4430,30 +4526,16 @@ static size_t wrapperStripQuotesInner(const TCHAR *prop, size_t propLen, TCHAR *
     return j;
 }
 
+/**
+ * Stripped quotes out of the prop argument.
+ * The resulting value in propStripped will always be equal or shorter in length
+ *  so the propStripped buffer should always be equal to the prop buffer in length.
+ */
 void wrapperStripQuotes(const TCHAR *prop, TCHAR *propStripped) {
     size_t len;
 
     len = wrapperStripQuotesInner(prop, _tcslen(prop), propStripped);
     propStripped[len] = TEXT('\0');
-}
-
-/*
- * Corrects a windows path in place by replacing all '/' characters with '\'
- *  on Windows versions.
- *
- * filename - Filename to be modified.  Could be null.
- */
-void correctWindowsPath(TCHAR *filename) {
-#ifdef WIN32
-    TCHAR *c;
-
-    if (filename) {
-        c = (TCHAR *)filename;
-        while((c = _tcschr(c, TEXT('/'))) != NULL) {
-            c[0] = TEXT('\\');
-        }
-    }
-#endif
 }
 
 /**
@@ -4669,7 +4751,7 @@ TCHAR* findPathOf(const TCHAR *exe, const TCHAR *name) {
 
     if (exe[0] == TEXT('/')) {
         /* This is an absolute reference. */
-        if (_trealpath(exe, resolvedPath)) {
+        if (_trealpathN(exe, resolvedPath, PATH_MAX + 1)) {
             _tcsncpy(pth, resolvedPath, PATH_MAX + 1);
             if (checkIfExecutable(pth)) {
                 ret = malloc((_tcslen(pth) + 1) * sizeof(TCHAR));
@@ -4693,7 +4775,7 @@ TCHAR* findPathOf(const TCHAR *exe, const TCHAR *name) {
     }
 
     /* This is a non-absolute reference.  See if it is a relative reference. */
-    if (_trealpath(exe, resolvedPath)) {
+    if (_trealpathN(exe, resolvedPath, PATH_MAX + 1)) {
         /* Resolved.  See if the file exists. */
         _tcsncpy(pth, resolvedPath, PATH_MAX + 1);
         if (checkIfExecutable(pth)) {
@@ -4755,7 +4837,7 @@ TCHAR* findPathOf(const TCHAR *exe, const TCHAR *name) {
                     log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_DEBUG, TEXT("  Check PATH entry: %s"), pth);
                 }
 #endif
-                if (_trealpath(pth, resolvedPath) != NULL) {
+                if (_trealpathN(pth, resolvedPath, PATH_MAX + 1) != NULL) {
                     /* Copy over the result. */
                     _tcsncpy(pth, resolvedPath, PATH_MAX + 1);
                     found = checkIfExecutable(pth);
@@ -4894,7 +4976,7 @@ int wrapperBuildJavaCommandArrayJavaCommand(TCHAR **strings, int addQuotes, int 
              *  be replaced by '\' characters in the specified path.
              * prop is supposed to be constant, but allow this change as it is
              *  the actual value that we want. */
-            correctWindowsPath((TCHAR *)prop);
+            wrapperCorrectWindowsPath((TCHAR *)prop);
 
             /* If the full path to the java command was not specified, then we
              *  need to try and resolve it here to avoid problems later when
@@ -5103,54 +5185,81 @@ int wrapperBuildJavaCommandArrayJavaAdditional(TCHAR **strings, int addQuotes, i
 
 /**
  * Java command line callback.
+ *
+ * @return FALSE if there were any problems.
  */
-static int loadParameterFileCallbackParam_AddArg(LoadParameterFileCallbackParam *param, TCHAR *arg, size_t argLen)
-{
-    TCHAR str[MAX_PROPERTY_VALUE_LENGTH];
-    TCHAR *s;
+static int loadParameterFileCallbackParam_AddArg(LoadParameterFileCallbackParam *param, TCHAR *arg, size_t argLen) {
+    TCHAR *argTerm;
+    TCHAR *argStripped;
+    TCHAR argExpanded[MAX_PROPERTY_VALUE_LENGTH];
     size_t len;
 
+    /* The incoming arg can not be considered to be null terminated so we need a local copy. */
+    if (!(argTerm = malloc(sizeof(TCHAR) * (argLen + 1)))) {
+        outOfMemory(TEXT("LPFCPAA"), 1);
+        return FALSE;
+    }
+    memcpy(argTerm, arg, sizeof(TCHAR) * argLen);
+    argTerm[argLen] = TEXT('\0');
 #ifdef _DEBUG
-    memcpy(str, arg, sizeof(TCHAR) * argLen);
-    str[argLen] = TEXT('\0');
-    log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_NOTICE, TEXT("    :> %s"), str);
+    log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_NOTICE, TEXT("    :> %s"), argTerm);
 #endif
 
     if (param->isJVMParam == TRUE) {
         /* As in wrapperBuildJavaCommandArrayJavaAdditional(), skip an
            argument which does not begin with '-'. */
-        if ((arg[0] != TEXT('-')) && !((arg[0] == TEXT('"')) && (arg[1] == TEXT('-')))) {
+        if ((argTerm[0] != TEXT('-')) && !((argTerm[0] == TEXT('"')) && (argTerm[1] == TEXT('-')))) {
             if (param->strings) {
-                memcpy(str, arg, sizeof(TCHAR) * argLen);
-                str[argLen] = TEXT('\0');
                 log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_WARN,
-                           TEXT("The value '%s' is not a valid argument to the JVM.  Skipping."), str);
+                           TEXT("The value '%s' is not a valid argument to the JVM.  Skipping."), argTerm);
             }
+            free(argTerm);
             return TRUE;
         }
     }
 
     if (param->strings) {
-        if (!param->stripQuote) {
-            s = arg;
-            len = argLen;
-        } else {
-            len = wrapperStripQuotesInner(arg, argLen, str);
-            s = str;
+        /* Create a buffer to hold the stripped copy of argTerm. */
+        len = _tcslen(argTerm);
+        if (!(argStripped = malloc(sizeof(TCHAR) * (len + 1)))) {
+            outOfMemory(TEXT("LPFCPAA"), 2);
+            free(argTerm);
+            return FALSE;
         }
+        
+        if (!param->stripQuote) {
+            /* Nothing to strip, simply copy the string. */
+            _tcsncpy(argStripped, argTerm, len + 1);
+        } else {
+            /* Strip the quotes. */
+            wrapperStripQuotes(argTerm, argStripped);
+        }
+        
+        /* No longer needed. */
+        free(argTerm);
+        
+        /* Just in case the string contains and environment variable references, make sure they are all evaluated.
+         *  argExpanded needs to be static because there is no way to know how long it will be in advance. */
+        evaluateEnvironmentVariables(argStripped, argExpanded, MAX_PROPERTY_VALUE_LENGTH, properties->logWarnings, properties->warnedVarMap, properties->logWarningLogLevel);
+        
+        /* No longer needed. */
+        free(argStripped);
+        
+        len = _tcslen(argExpanded);
         param->strings[param->index] = malloc(sizeof(TCHAR) * (len + 1));
         if (!param->strings[param->index]) {
             return FALSE;
         }
-        memcpy(param->strings[param->index], s, sizeof(TCHAR) * len);
-        param->strings[param->index][len] = TEXT('\0');
+        _tcsncpy(param->strings[param->index], argExpanded, len + 1);
+    } else {
+        free(argTerm);
     }
+    
     param->index++;
     return TRUE;
 }
 
-static int loadParameterFileCallback(void *callbackParam, const TCHAR *fileName, int lineNumber, TCHAR *config, int debugProperties)
-{
+static int loadParameterFileCallback(void *callbackParam, const TCHAR *fileName, int lineNumber, TCHAR *config, int debugProperties) {
     LoadParameterFileCallbackParam *param = (LoadParameterFileCallbackParam *)callbackParam;
     TCHAR *tail_bound;
     TCHAR *arg;
@@ -5225,7 +5334,6 @@ static int loadParameterFileCallback(void *callbackParam, const TCHAR *fileName,
 int wrapperLoadParameterFile(TCHAR **strings, int addQuotes, int detectDebugJVM, int index, TCHAR *parameterName, int isJVMParameter) {
     const TCHAR *parameterFilePath;
     LoadParameterFileCallbackParam callbackParam;
-    ConfigFileReader reader;
     int readResult;
     TCHAR prop[256];
 
@@ -5248,8 +5356,7 @@ int wrapperLoadParameterFile(TCHAR **strings, int addQuotes, int detectDebugJVM,
     callbackParam.index = index;
     callbackParam.isJVMParam = isJVMParameter;
 
-    configFileReader_Initialize(&reader, loadParameterFileCallback, &callbackParam, FALSE);
-    readResult = configFileReader_Read(&reader, parameterFilePath, TRUE, 0, NULL, 0);
+    readResult = configFileReader(parameterFilePath, TRUE, loadParameterFileCallback, &callbackParam, FALSE, FALSE);
     switch (readResult) {
     case CONFIG_FILE_READER_SUCCESS:
         return callbackParam.index;
@@ -5368,12 +5475,12 @@ int wrapperBuildJavaCommandArrayLibraryPath(TCHAR **strings, int addQuotes, int 
             }
 
             /* Start with the property value. */
-            _sntprintf(&(strings[index][cpLen]), cpLenAlloc, TEXT("-Djava.library.path="));
+            _sntprintf(&(strings[index][cpLen]), cpLenAlloc - cpLen, TEXT("-Djava.library.path="));
             cpLen += 20;
 
             /* Add an open quote to the library path */
             if (addQuotes) {
-                _sntprintf(&(strings[index][cpLen]), cpLenAlloc, TEXT("\""));
+                _sntprintf(&(strings[index][cpLen]), cpLenAlloc - cpLen, TEXT("\""));
                 cpLen++;
             }
 
@@ -5418,7 +5525,7 @@ int wrapperBuildJavaCommandArrayLibraryPath(TCHAR **strings, int addQuotes, int 
                         if (j > 0) {
                             strings[index][cpLen++] = wrapperClasspathSeparator; /* separator */
                         }
-                        _sntprintf(&(strings[index][cpLen]), cpLenAlloc, TEXT("%s"), prop);
+                        _sntprintf(&(strings[index][cpLen]), cpLenAlloc - cpLen, TEXT("%s"), prop);
                         cpLen += len2;
                         j++;
                     }
@@ -5452,7 +5559,7 @@ int wrapperBuildJavaCommandArrayLibraryPath(TCHAR **strings, int addQuotes, int 
                     if (j > 0) {
                         strings[index][cpLen++] = wrapperClasspathSeparator; /* separator */
                     }
-                    _sntprintf(&(strings[index][cpLen]), cpLenAlloc, TEXT("%s"), systemPath);
+                    _sntprintf(&(strings[index][cpLen]), cpLenAlloc - cpLen, TEXT("%s"), systemPath);
                     cpLen += len2;
                     j++;
                 }
@@ -5460,7 +5567,8 @@ int wrapperBuildJavaCommandArrayLibraryPath(TCHAR **strings, int addQuotes, int 
 
             if (j == 0) {
                 /* No library path, use default. always room */
-                _sntprintf(&(strings[index][cpLen++]), cpLenAlloc, TEXT("./"));
+                _sntprintf(&(strings[index][cpLen]), cpLenAlloc - cpLen, TEXT("./"));
+                cpLen++;
             }
             /* Add ending quote.  If the previous character is a backslash then
              *  Windows will use it to escape the quote.  To make things work
@@ -5468,10 +5576,10 @@ int wrapperBuildJavaCommandArrayLibraryPath(TCHAR **strings, int addQuotes, int 
              *  result in a single backslash before the quote. */
             if (addQuotes) {
                 if (strings[index][cpLen - 1] == TEXT('\\')) {
-                    _sntprintf(&(strings[index][cpLen]), cpLenAlloc, TEXT("\\"));
+                    _sntprintf(&(strings[index][cpLen]), cpLenAlloc - cpLen, TEXT("\\"));
                     cpLen++;
                 }
-                _sntprintf(&(strings[index][cpLen]), cpLenAlloc, TEXT("\""));
+                _sntprintf(&(strings[index][cpLen]), cpLenAlloc - cpLen, TEXT("\""));
                 cpLen++;
             }
 
@@ -5595,7 +5703,7 @@ int wrapperBuildJavaClasspath(TCHAR **classpath) {
                     if (j > 0) {
                         (*classpath)[cpLen++] = wrapperClasspathSeparator; /* separator */
                     }
-                    _sntprintf(&((*classpath)[cpLen]), cpLenAlloc, TEXT("%s"), files[cnt]);
+                    _sntprintf(&((*classpath)[cpLen]), cpLenAlloc - cpLen, TEXT("%s"), files[cnt]);
                     cpLen += len2;
                     j++;
                     cnt++;
@@ -5682,7 +5790,8 @@ int wrapperBuildJavaClasspath(TCHAR **classpath) {
     freeStringProperties(propertyNames, propertyValues, propertyIndices);
     if (j == 0) {
         /* No classpath, use default. always room */
-        _sntprintf(&(*classpath[cpLen++]), cpLenAlloc, TEXT("./"));
+        _sntprintf(&(*classpath[cpLen]), cpLenAlloc - cpLen, TEXT("./"));
+        cpLen++;
     }
 
     return 0;
@@ -5720,11 +5829,11 @@ int wrapperBuildJavaCommandArrayClasspath(TCHAR **strings, int addQuotes, int in
 
         /* Add an open quote the classpath */
         if (addQuotes) {
-            _sntprintf(&(strings[index][cpLen]), len + 4, TEXT("\""));
+            _sntprintf(&(strings[index][cpLen]), len + 4 - cpLen, TEXT("\""));
             cpLen++;
         }
 
-        _sntprintf(&(strings[index][cpLen]), len + 4, TEXT("%s"), classpath);
+        _sntprintf(&(strings[index][cpLen]), len + 4 - cpLen, TEXT("%s"), classpath);
         cpLen += len;
 
         /* Add ending quote.  If the previous character is a backslash then
@@ -5733,10 +5842,10 @@ int wrapperBuildJavaCommandArrayClasspath(TCHAR **strings, int addQuotes, int in
          *  result in a single backslash before the quote. */
         if (addQuotes) {
             if (strings[index][cpLen - 1] == TEXT('\\')) {
-                _sntprintf(&(strings[index][cpLen]), len + 4, TEXT("\\"));
+                _sntprintf(&(strings[index][cpLen]), len + 4 - cpLen, TEXT("\\"));
                 cpLen++;
             }
-            _sntprintf(&(strings[index][cpLen]), len + 4, TEXT("\""));
+            _sntprintf(&(strings[index][cpLen]), len + 4 - cpLen, TEXT("\""));
             cpLen++;
         }
 
@@ -6842,37 +6951,49 @@ void wrapperLoadHostName() {
             getLastErrorText());
     } else {
 #ifdef UNICODE
-#ifdef WIN32
+ #ifdef WIN32
         len = MultiByteToWideChar(CP_OEMCP, 0, hostName, -1, NULL, 0);
-        hostName2 = malloc((len + 1) * sizeof(LPWSTR));
+        if (len <= 0) {
+            log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_WARN,
+                TEXT("Invalid multibyte sequence in port address \"%s\" : %s"), hostName, getLastErrorText());
+            return;
+        }
+
+        hostName2 = malloc(sizeof(LPWSTR) * (len + 1));
         if (!hostName2) {
             outOfMemory(TEXT("LHN"), 1);
             return;
         }
         MultiByteToWideChar(CP_OEMCP,0, hostName, -1, hostName2, len + 1);
-#else
-        len = mbstowcs(NULL, hostName, 0) + 1;
-        hostName2 = malloc(len * sizeof(TCHAR));
+ #else
+        len = mbstowcs(NULL, hostName, MBSTOWCS_QUERY_LENGTH);
+        if (len == (size_t)-1) {
+            log_printf(WRAPPER_SOURCE_WRAPPER, LEVEL_WARN,
+                TEXT("Invalid multibyte sequence in port address \"%s\" : %s"), hostName, getLastErrorText());
+            return;
+        }
+        hostName2 = malloc(sizeof(TCHAR) * (len + 1));
         if (!hostName2) {
             outOfMemory(TEXT("LHN"), 2);
             return;
         }
-        mbstowcs(hostName2, hostName, len);
-#endif
+        mbstowcs(hostName2, hostName, len + 1);
+        hostName2[len] = TEXT('\0'); /* Avoid bufferflows caused by badly encoded characters. */
+ #endif
 #else
         /* No conversion needed.  Do an extra malloc here to keep the code simple below. */
-        len = _tcslen(hostName) + 1;
-        hostName2 = malloc(len * sizeof(TCHAR));
+        len = _tcslen(hostName);
+        hostName2 = malloc(sizeof(TCHAR) * (len + 1));
         if (!hostName2) {
             outOfMemory(TEXT("LHN"), 3);
             return;
         }
-        _tcsncpy(hostName2, hostName, len);
+        _tcsncpy(hostName2, hostName, len + 1);
 #endif
 
         wrapperData->hostName = malloc(sizeof(TCHAR) * (_tcslen(hostName2) + 1));
         if (!wrapperData->hostName) {
-            outOfMemory(TEXT("LHN"), 2);
+            outOfMemory(TEXT("LHN"), 4);
             free(hostName2);
             return;
         }
@@ -7302,6 +7423,10 @@ int loadConfiguration() {
     /* Get the wrapper command log level. */
     wrapperData->commandLogLevel = getLogLevelForName(
         getStringProperty(properties, TEXT("wrapper.java.command.loglevel"), TEXT("DEBUG")));
+    if (wrapperData->commandLogLevel >= LEVEL_NONE) {
+        /* Should never be possible to completely disable the java command as this would make it very difficult to support. */
+        wrapperData->commandLogLevel = LEVEL_DEBUG;
+    }
     
     /* Should we detach the JVM on startup. */
     if (wrapperData->isConsole) {
@@ -7523,34 +7648,34 @@ int loadConfiguration() {
     /** Get the pid files if any.  May be NULL */
     if (!wrapperData->configured) {
         updateStringValue(&wrapperData->pidFilename, getFileSafeStringProperty(properties, TEXT("wrapper.pidfile"), NULL));
-        correctWindowsPath(wrapperData->pidFilename);
+        wrapperCorrectWindowsPath(wrapperData->pidFilename);
     }
     wrapperData->pidFileStrict = getBooleanProperty(properties, TEXT("wrapper.pidfile.strict"), FALSE);
     
     updateStringValue(&wrapperData->javaPidFilename, getFileSafeStringProperty(properties, TEXT("wrapper.java.pidfile"), NULL));
-    correctWindowsPath(wrapperData->javaPidFilename);
+    wrapperCorrectWindowsPath(wrapperData->javaPidFilename);
 
     /** Get the lock file if any.  May be NULL */
     if (!wrapperData->configured) {
         updateStringValue(&wrapperData->lockFilename, getFileSafeStringProperty(properties, TEXT("wrapper.lockfile"), NULL));
-        correctWindowsPath(wrapperData->lockFilename);
+        wrapperCorrectWindowsPath(wrapperData->lockFilename);
     }
 
     /** Get the java id file.  May be NULL */
     updateStringValue(&wrapperData->javaIdFilename, getFileSafeStringProperty(properties, TEXT("wrapper.java.idfile"), NULL));
-    correctWindowsPath(wrapperData->javaIdFilename);
+    wrapperCorrectWindowsPath(wrapperData->javaIdFilename);
 
     /** Get the status files if any.  May be NULL */
     if (!wrapperData->configured) {
         updateStringValue(&wrapperData->statusFilename, getFileSafeStringProperty(properties, TEXT("wrapper.statusfile"), NULL));
-        correctWindowsPath(wrapperData->statusFilename);
+        wrapperCorrectWindowsPath(wrapperData->statusFilename);
     }
     updateStringValue(&wrapperData->javaStatusFilename, getFileSafeStringProperty(properties, TEXT("wrapper.java.statusfile"), NULL));
-    correctWindowsPath(wrapperData->javaStatusFilename);
+    wrapperCorrectWindowsPath(wrapperData->javaStatusFilename);
 
     /** Get the command file if any. May be NULL */
     updateStringValue(&wrapperData->commandFilename, getFileSafeStringProperty(properties, TEXT("wrapper.commandfile"), NULL));
-    correctWindowsPath(wrapperData->commandFilename);
+    wrapperCorrectWindowsPath(wrapperData->commandFilename);
     wrapperData->commandFileTests = getBooleanProperty(properties, TEXT("wrapper.commandfile.enable_tests"), FALSE);
 
     /** Get the interval at which the command file will be polled. */
@@ -7559,7 +7684,7 @@ int loadConfiguration() {
     /** Get the anchor file if any.  May be NULL */
     if (!wrapperData->configured) {
         updateStringValue(&wrapperData->anchorFilename, getFileSafeStringProperty(properties, TEXT("wrapper.anchorfile"), NULL));
-        correctWindowsPath(wrapperData->anchorFilename);
+        wrapperCorrectWindowsPath(wrapperData->anchorFilename);
     }
 
     /** Get the interval at which the anchor file will be polled. */
@@ -8367,7 +8492,7 @@ void wrapperStartedSignaled() {
 }
 
 #ifdef CUNIT
-static void subTestJavaAdditionalParamSuite(int stripQuote, TCHAR *config, TCHAR **strings, int strings_len, int isJVMParam) {
+static void tsJAP_subTestJavaAdditionalParamSuite(int stripQuote, TCHAR *config, TCHAR **strings, int strings_len, int isJVMParam) {
     LoadParameterFileCallbackParam param;
     int ret;
     int i;
@@ -8395,9 +8520,9 @@ static void subTestJavaAdditionalParamSuite(int stripQuote, TCHAR *config, TCHAR
     }
 }
 
-#define ARRAY_LENGTH(a) (sizeof(a) / sizeof(a[0]))
+#define TSJAP_ARRAY_LENGTH(a) (sizeof(a) / sizeof(a[0]))
 
-void testJavaAdditionalParamSuite(void) {
+void tsJAP_testJavaAdditionalParamSuite(void) {
     int stripQuote;
     int i = 0;
     int isJVM = TRUE;
@@ -8412,7 +8537,7 @@ void testJavaAdditionalParamSuite(void) {
             TCHAR *config = TEXT("-Dsomething=something");
             TCHAR *strings[1];
             strings[0] = TEXT("-Dsomething=something");
-            subTestJavaAdditionalParamSuite(FALSE, config, strings, ARRAY_LENGTH(strings), isJVM);
+            tsJAP_subTestJavaAdditionalParamSuite(FALSE, config, strings, TSJAP_ARRAY_LENGTH(strings), isJVM);
         }
         {
             /* Multiple parameters in 1 line. */
@@ -8420,7 +8545,7 @@ void testJavaAdditionalParamSuite(void) {
             TCHAR *strings[2];
             strings[0] = TEXT("-Dsomething=something");
             strings[1] = TEXT("-Dxxx=xxx");
-            subTestJavaAdditionalParamSuite(FALSE, config, strings, ARRAY_LENGTH(strings), isJVM);
+            tsJAP_subTestJavaAdditionalParamSuite(FALSE, config, strings, TSJAP_ARRAY_LENGTH(strings), isJVM);
         }
         {
             /* Horizontal Tab is not a delimiter. */
@@ -8428,7 +8553,7 @@ void testJavaAdditionalParamSuite(void) {
             TCHAR *strings[2];
             strings[0] = TEXT("-Dsomething1=something1\t-Dsomething2=something2");
             strings[1] = TEXT("-Dxxx=xxx");
-            subTestJavaAdditionalParamSuite(FALSE, config, strings, ARRAY_LENGTH(strings), isJVM);
+            tsJAP_subTestJavaAdditionalParamSuite(FALSE, config, strings, TSJAP_ARRAY_LENGTH(strings), isJVM);
         }
         {
             /* Horizontal Tab is not a delimiter. */
@@ -8436,7 +8561,7 @@ void testJavaAdditionalParamSuite(void) {
             TCHAR *strings[2];
             strings[0] = TEXT("-Dsomething1=something1\t-Dsomething2=something2");
             strings[1] = TEXT("-Dxxx=xxx");
-            subTestJavaAdditionalParamSuite(FALSE, config, strings, ARRAY_LENGTH(strings), isJVM);
+            tsJAP_subTestJavaAdditionalParamSuite(FALSE, config, strings, TSJAP_ARRAY_LENGTH(strings), isJVM);
         }
         if (isJVM == TRUE) {
             {
@@ -8444,7 +8569,7 @@ void testJavaAdditionalParamSuite(void) {
                 TCHAR *config = TEXT("something=something -Dxxx=xxx");
                 TCHAR *strings[1];
                 strings[0] = TEXT("-Dxxx=xxx");
-                subTestJavaAdditionalParamSuite(FALSE, config, strings, ARRAY_LENGTH(strings), isJVM);
+                tsJAP_subTestJavaAdditionalParamSuite(FALSE, config, strings, TSJAP_ARRAY_LENGTH(strings), isJVM);
             }
         } else {
             {
@@ -8453,7 +8578,7 @@ void testJavaAdditionalParamSuite(void) {
             TCHAR *strings[2];
             strings[0] = TEXT("something=something");
             strings[1] = TEXT("-Dxxx=xxx");
-            subTestJavaAdditionalParamSuite(FALSE, config, strings, ARRAY_LENGTH(strings), isJVM);
+            tsJAP_subTestJavaAdditionalParamSuite(FALSE, config, strings, TSJAP_ARRAY_LENGTH(strings), isJVM);
             }
         }
 
@@ -8465,7 +8590,7 @@ void testJavaAdditionalParamSuite(void) {
             TCHAR *strings[2];
             strings[0] = TEXT("-DmyApp.x1=\"Hello World.\"");
             strings[1] = TEXT("-DmyApp.x2=x2");
-            subTestJavaAdditionalParamSuite(stripQuote, config, strings, ARRAY_LENGTH(strings), isJVM);
+            tsJAP_subTestJavaAdditionalParamSuite(stripQuote, config, strings, TSJAP_ARRAY_LENGTH(strings), isJVM);
         }
         {
             /* Quotations #2 */
@@ -8473,7 +8598,7 @@ void testJavaAdditionalParamSuite(void) {
             TCHAR *strings[2];
             strings[0] = TEXT("\"-DmyApp.x1=Hello World.\"");
             strings[1] = TEXT("-DmyApp.x2=x2");
-            subTestJavaAdditionalParamSuite(stripQuote, config, strings, ARRAY_LENGTH(strings), isJVM);
+            tsJAP_subTestJavaAdditionalParamSuite(stripQuote, config, strings, TSJAP_ARRAY_LENGTH(strings), isJVM);
         }
         {
             /* Escaped quotation */
@@ -8481,7 +8606,7 @@ void testJavaAdditionalParamSuite(void) {
             TCHAR *strings[2];
             strings[0] = TEXT("-DmyApp.x1=\"Hello \\\"World.\"");
             strings[1] = TEXT("-DmyApp.x2=x2");
-            subTestJavaAdditionalParamSuite(stripQuote, config, strings, ARRAY_LENGTH(strings), isJVM);
+            tsJAP_subTestJavaAdditionalParamSuite(stripQuote, config, strings, TSJAP_ARRAY_LENGTH(strings), isJVM);
         }
         {
             /* Escaped backslash */
@@ -8489,7 +8614,7 @@ void testJavaAdditionalParamSuite(void) {
             TCHAR *strings[2];
             strings[0] = TEXT("-DmyApp.x1=\"Hello World.\\\\\"");
             strings[1] = TEXT("-DmyApp.x2=x2");
-            subTestJavaAdditionalParamSuite(stripQuote, config, strings, ARRAY_LENGTH(strings), isJVM);
+            tsJAP_subTestJavaAdditionalParamSuite(stripQuote, config, strings, TSJAP_ARRAY_LENGTH(strings), isJVM);
         }
         /* Test set #3 : with stripping double quotations */
         stripQuote = TRUE;
@@ -8499,7 +8624,7 @@ void testJavaAdditionalParamSuite(void) {
             TCHAR *strings[2];
             strings[0] = TEXT("-DmyApp.x1=Hello World.");
             strings[1] = TEXT("-DmyApp.x2=x2");
-            subTestJavaAdditionalParamSuite(stripQuote, config, strings, ARRAY_LENGTH(strings), isJVM);
+            tsJAP_subTestJavaAdditionalParamSuite(stripQuote, config, strings, TSJAP_ARRAY_LENGTH(strings), isJVM);
         }
         {
             /* Quotations #2 */
@@ -8507,7 +8632,7 @@ void testJavaAdditionalParamSuite(void) {
             TCHAR *strings[2];
             strings[0] = TEXT("-DmyApp.x1=Hello World.");
             strings[1] = TEXT("-DmyApp.x2=x2");
-            subTestJavaAdditionalParamSuite(stripQuote, config, strings, ARRAY_LENGTH(strings), isJVM);
+            tsJAP_subTestJavaAdditionalParamSuite(stripQuote, config, strings, TSJAP_ARRAY_LENGTH(strings), isJVM);
         }
         {
             /* Escaped quotation */
@@ -8515,7 +8640,7 @@ void testJavaAdditionalParamSuite(void) {
             TCHAR *strings[2];
             strings[0] = TEXT("-DmyApp.x1=Hello \"World.");
             strings[1] = TEXT("-DmyApp.x2=x2");  
-            subTestJavaAdditionalParamSuite(stripQuote, config, strings, ARRAY_LENGTH(strings), isJVM);
+            tsJAP_subTestJavaAdditionalParamSuite(stripQuote, config, strings, TSJAP_ARRAY_LENGTH(strings), isJVM);
         }
         {
             /* Escaped backslash */
@@ -8523,7 +8648,7 @@ void testJavaAdditionalParamSuite(void) {
             TCHAR *strings[2];
             strings[0] = TEXT("-DmyApp.x1=Hello World.\\");
             strings[1] = TEXT("-DmyApp.x2=x2");
-            subTestJavaAdditionalParamSuite(stripQuote, config, strings, ARRAY_LENGTH(strings), isJVM);
+            tsJAP_subTestJavaAdditionalParamSuite(stripQuote, config, strings, TSJAP_ARRAY_LENGTH(strings), isJVM);
         }
     }
 }
