@@ -1,6 +1,8 @@
-service-wrapper-java (3.5.25-1) UNRELEASED; urgency=medium
+service-wrapper-java (3.5.25-1) unstable; urgency=medium
 
-  * New upstream release
+  [ Kill Your TV ]
+  * Team upload.  
+  * New upstream release. (Closes: #759565)
   * debian/control
     - add java7-runtime-headless as an alternate to satisfy the java
       dependencies
@@ -14,7 +16,11 @@ service-wrapper-java (3.5.25-1) UNRELEASED; urgency=medium
     - Update additional-makefiles.patch and kfreebsd-support.patch to add the
       LDFLAGS variable
 
- -- Kill Your TV <killyourtv@i2pmail.org>  Thu, 28 Aug 2014 13:24:16 +0000
+  [ tony mancill ]
+  * Add a minimal get-orig-source target to debian/rules.
+  * Update Vcs- fields to use canonical URLs.
+
+ -- tony mancill <tmancill@debian.org>  Thu, 28 Aug 2014 10:34:11 -0700
 
 service-wrapper-java (3.5.22-3) unstable; urgency=low
 
